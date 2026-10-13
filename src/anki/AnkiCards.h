@@ -50,25 +50,28 @@ enum class AnkiGrade : uint8_t { Unknown = 0, Again = 1, Good = 2 };
 // to a different card.
 struct AnkiProgressRecord {
   uint32_t frontHash = 0;
-  uint16_t intervalDays = 0;  // 0 = new / due immediately
+  uint32_t dueAtSession = 0;  // deck visit this card becomes due again; 0 = never scheduled
   uint8_t repetitions = 0;    // consecutive "know" answers
   uint8_t againCount = 0;     // "don't know" answers
-  uint32_t lastReviewed = 0;  // epoch seconds; 0 = never
+  uint16_t reserved = 0;      // keeps the record 12 bytes and 4-byte aligned
 };
-// The host tool writes the same layout; keep the field order/types in sync with
-// sd-plugins/anki/anki_import.py.
-static_assert(sizeof(AnkiProgressRecord) == 12, "progress record layout is shared with the host tool");
+// progress.bin is a fixed-slot file (one slot per card), so the record size is
+// part of the on-disk layout and must not change.
+static_assert(sizeof(AnkiProgressRecord) == 12, "progress record must stay 12 bytes");
 
-// SM-2-lite schedule, integer only (no FPU on ESP32-C3, and the review screen
-// must not drag in float formatting). The ladder is deliberately short: a
-// device that may run without a synced clock can only skip whole days.
+// Scheduling is counted in **deck visits**, not days: the Xteink X4 has no RTC
+// and nothing seeds the system clock, so a wall-clock interval would leave every
+// card permanently due (the clock reads below 2000-01-01 forever). One session
+// is one entry into the deck; the counter lives in progress.bin and survives
+// reboots and deep sleep.
 namespace AnkiSrs {
-constexpr uint16_t INTERVAL_DAYS[] = {0, 1, 3, 7, 15, 30, 60, 120};
-constexpr size_t INTERVAL_COUNT = sizeof(INTERVAL_DAYS) / sizeof(INTERVAL_DAYS[0]);
-
-uint16_t intervalForRepetitions(uint8_t repetitions);
-AnkiProgressRecord applyGrade(const AnkiProgressRecord& current, AnkiGrade grade, uint32_t nowEpoch);
-bool isDue(const AnkiProgressRecord& record, uint32_t nowEpoch);
+// `minSessions` — сколько заходов в колоду карточка, помеченная "I know", не
+// показывается. Значение приходит из настройки
+// CrossPointSettings::ankiMinSessions, поэтому модуль хранилища не зависит от
+// модуля настроек и лишь защитно ограничивает переданное число снизу.
+AnkiProgressRecord applyGrade(const AnkiProgressRecord& current, AnkiGrade grade, uint32_t session,
+                              uint8_t minSessions);
+bool isDue(const AnkiProgressRecord& record, uint32_t session);
 }  // namespace AnkiSrs
 
 // One deck = one folder under /cards. Decks are indexed, never loaded: only
@@ -85,11 +88,7 @@ class AnkiCardStore {
   static constexpr uint32_t MAX_DECKS = 32;
   static constexpr size_t MAX_FIELD_BYTES = 480;
   static constexpr size_t MAX_IMAGE_NAME_BYTES = 64;
-  static constexpr size_t PROGRESS_HEADER_BYTES = 8;  // magic u32 + version u16 + recordSize u16
-  // Epochs before this are treated as "clock not set" (no NTP yet): intervals
-  // are then ignored and every card stays reviewable, which is safer than
-  // silently locking the deck away behind an interval the device cannot count.
-  static constexpr uint32_t MIN_VALID_EPOCH = 946684800u;  // 2000-01-01
+  static constexpr size_t PROGRESS_HEADER_BYTES = 12;  // magic u32 + version u16 + recordSize u16 + session u32
 
   // FNV-1a/32 of the card's word; the host tool uses the same hash if it
   // pre-seeds progress records.
@@ -122,8 +121,14 @@ class AnkiCardStore {
   // to different text — callers must then treat the card as new.
   bool loadProgress(size_t index, AnkiProgressRecord& out) const;
 
-  // Applies `grade` to the card at `index` and persists the result.
-  bool recordGrade(size_t index, AnkiGrade grade, uint32_t nowEpoch);
+  // Starts a deck visit: creates progress.bin when it is missing, replaces it
+  // when it carries a different layout, then bumps and persists the session
+  // counter. `outSession` receives the number of this visit (1 for the first).
+  bool beginSession(uint32_t& outSession);
+
+  // Applies `grade` to the card at `index` and persists the result. `session` is
+  // the value beginSession() returned for this visit.
+  bool recordGrade(size_t index, AnkiGrade grade, uint32_t session, uint8_t minSessions);
 
  private:
   std::string cardsPath() const { return folder_ + "/cards.tsv"; }
@@ -136,8 +141,8 @@ class AnkiCardStore {
 };
 
 // Indices of the cards to review, in deck order. With dueOnly set, only the
-// cards whose interval has elapsed are listed; otherwise every card in the deck
-// is listed (a manual "review everything" session). Shared by
-// AnkiReviewActivity and the host tests, so the scheduling rules that decide
-// what the review screen shows are covered off-device.
-void buildReviewQueue(const AnkiCardStore& store, uint32_t nowEpoch, bool dueOnly, std::vector<size_t>& out);
+// cards that have come due by `session` are listed; otherwise every card in the
+// deck is listed (a manual "review everything" session, which deliberately
+// ignores the schedule). Shared by AnkiReviewActivity and the host tests, so the
+// rules that decide what the review screen shows are covered off-device.
+void buildReviewQueue(const AnkiCardStore& store, uint32_t session, bool dueOnly, std::vector<size_t>& out);

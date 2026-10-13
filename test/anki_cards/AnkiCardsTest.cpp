@@ -1,4 +1,4 @@
-// Host tests for the Anki card store and its SM-2-lite schedule.
+// Host tests for the Anki card store and its visit-based schedule.
 // The storage layer is the project's fake HalStorage (test/library_builder/stubs),
 // which keeps the whole SD card in a std::map, so these tests need no hardware.
 
@@ -8,10 +8,11 @@
 #include <HalStorage.h>
 
 namespace {
-// 2030-05-13: comfortably after AnkiCardStore::MIN_VALID_EPOCH (2000-01-01),
-// so intervals are actually counted instead of being ignored.
-constexpr uint32_t kNow = 1900000000u;
-constexpr uint32_t kDay = 86400u;
+// The schedule is counted in deck visits, not days: the Xteink X4 has no RTC and
+// nothing seeds the system clock, so a wall-clock interval would leave every card
+// permanently due. A "session" is just a small integer here.
+constexpr uint32_t kSession = 10;
+constexpr uint8_t kGap = 4;  // CrossPointSettings::DEFAULT_ANKI_MIN_SESSIONS
 
 std::string cardsTsv(const std::vector<std::string>& lines) {
   std::string out;
@@ -25,83 +26,69 @@ std::string cardsTsv(const std::vector<std::string>& lines) {
 // ---------------------------------------------------------------------------
 
 TEST(AnkiSrs, NewCardIsAlwaysDue) {
-  EXPECT_TRUE(AnkiSrs::isDue(AnkiProgressRecord{}, kNow));
+  EXPECT_TRUE(AnkiSrs::isDue(AnkiProgressRecord{}, kSession));
 }
 
-TEST(AnkiSrs, AgainAnswerIsAlwaysDue) {
-  // An "I don't know" answer resets the interval to 0, so the card is due
-  // again no matter how much time has passed.
+TEST(AnkiSrs, GoodParksTheCardForTheConfiguredGap) {
+  AnkiProgressRecord record{};
+  record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kSession, kGap);
+  EXPECT_EQ(record.repetitions, 1u);
+  EXPECT_EQ(record.dueAtSession, kSession + kGap);
+  // Hidden on the visits in between, due exactly on the gap-th one.
+  EXPECT_FALSE(AnkiSrs::isDue(record, kSession));
+  EXPECT_FALSE(AnkiSrs::isDue(record, kSession + kGap - 1));
+  EXPECT_TRUE(AnkiSrs::isDue(record, kSession + kGap));
+}
+
+TEST(AnkiSrs, GoodKeepsAFixedGapHoweverOftenItIsAnswered) {
+  // A growing ladder would hide a well-known card for months once the unit is a
+  // deck visit, so the gap stays put and only the counters grow.
+  AnkiProgressRecord record{};
+  for (int i = 0; i < 12; ++i) {
+    record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kSession, kGap);
+    EXPECT_EQ(record.dueAtSession, kSession + kGap);
+  }
+  EXPECT_EQ(record.repetitions, 12u);
+}
+
+TEST(AnkiSrs, AgainAnswerIsDueImmediately) {
   AnkiProgressRecord record{};
   record.repetitions = 6;
-  record.intervalDays = 120;
-  record.lastReviewed = kNow;
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Again, kNow);
-  EXPECT_EQ(record.intervalDays, 0u);
-  EXPECT_TRUE(AnkiSrs::isDue(record, kNow + 30 * kDay));
+  record.dueAtSession = kSession + 120;
+  record = AnkiSrs::applyGrade(record, AnkiGrade::Again, kSession, kGap);
+  EXPECT_EQ(record.repetitions, 0u);
+  EXPECT_EQ(record.dueAtSession, kSession);
+  EXPECT_TRUE(AnkiSrs::isDue(record, kSession));
+  // ...and it stays due however many visits pass, so a failed card cannot hide.
+  EXPECT_TRUE(AnkiSrs::isDue(record, kSession + 30));
 }
 
-TEST(AnkiSrs, GoodMovesUpTheIntervalLadder) {
-  AnkiProgressRecord record{};
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kNow);
-  EXPECT_EQ(record.repetitions, 1u);
-  EXPECT_EQ(record.intervalDays, 1u);  // ladder[1]
-  EXPECT_EQ(record.lastReviewed, kNow);
-
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kNow);
-  EXPECT_EQ(record.repetitions, 2u);
-  EXPECT_EQ(record.intervalDays, 3u);  // ladder[2]
-
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kNow);
-  EXPECT_EQ(record.intervalDays, 7u);  // ladder[3]
-}
-
-TEST(AnkiSrs, IntervalLadderCapsAtItsLastStep) {
-  AnkiProgressRecord record{};
-  for (int i = 0; i < 12; ++i) record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kNow);
-  EXPECT_EQ(record.repetitions, AnkiSrs::INTERVAL_COUNT);
-  EXPECT_EQ(record.intervalDays, AnkiSrs::INTERVAL_DAYS[AnkiSrs::INTERVAL_COUNT - 1]);
-}
-
-TEST(AnkiSrs, AgainResetsTheScheduleAndCounts) {
+TEST(AnkiSrs, AgainCountsAndResetsRepetitions) {
   AnkiProgressRecord record{};
   record.repetitions = 3;
-  record.intervalDays = 7;
+  record.dueAtSession = kSession + 7;
   record.againCount = 1;
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Again, kNow);
+  record = AnkiSrs::applyGrade(record, AnkiGrade::Again, kSession, kGap);
   EXPECT_EQ(record.repetitions, 0u);
-  EXPECT_EQ(record.intervalDays, 0u);  // due again immediately
   EXPECT_EQ(record.againCount, 2u);
-  EXPECT_EQ(record.lastReviewed, kNow);
 }
 
-TEST(AnkiSrs, CardBecomesDueOnceItsIntervalHasPassed) {
+TEST(AnkiSrs, ZeroGapCannotMakeAKnownCardDueImmediately) {
+  // The Settings row enforces 1..30, but a corrupt settings byte must not turn
+  // "I know" into a no-op.
   AnkiProgressRecord record{};
-  record.repetitions = 1;
-  record.intervalDays = 1;
-  record.lastReviewed = kNow;
-  EXPECT_FALSE(AnkiSrs::isDue(record, kNow));
-  EXPECT_FALSE(AnkiSrs::isDue(record, kNow + kDay - 1));
-  EXPECT_TRUE(AnkiSrs::isDue(record, kNow + kDay));
+  record = AnkiSrs::applyGrade(record, AnkiGrade::Good, kSession, 0);
+  EXPECT_EQ(record.dueAtSession, kSession + 1);
+  EXPECT_FALSE(AnkiSrs::isDue(record, kSession));
 }
 
-TEST(AnkiSrs, UnsyncedClockKeepsEveryCardDue) {
-  // Before 2000-01-01 the host has not set the clock (no NTP yet); intervals
-  // would be meaningless, so nothing is allowed to hide behind one.
-  AnkiProgressRecord record{};
-  record.repetitions = 7;
-  record.intervalDays = 120;
-  record.lastReviewed = kNow;
-  EXPECT_TRUE(AnkiSrs::isDue(record, AnkiCardStore::MIN_VALID_EPOCH - 1));
-}
-
-TEST(AnkiSrs, UnknownGradeOnlyStampsTheReviewTime) {
+TEST(AnkiSrs, UnknownGradeChangesNothing) {
   AnkiProgressRecord record{};
   record.repetitions = 2;
-  record.intervalDays = 3;
-  record = AnkiSrs::applyGrade(record, AnkiGrade::Unknown, kNow);
-  EXPECT_EQ(record.lastReviewed, kNow);
+  record.dueAtSession = kSession + 3;
+  record = AnkiSrs::applyGrade(record, AnkiGrade::Unknown, kSession, kGap);
   EXPECT_EQ(record.repetitions, 2u);
-  EXPECT_EQ(record.intervalDays, 3u);
+  EXPECT_EQ(record.dueAtSession, kSession + 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +98,7 @@ TEST(AnkiSrs, UnknownGradeOnlyStampsTheReviewTime) {
 TEST(AnkiCardStore, HashFrontIsStableAndTextSensitive) {
   EXPECT_EQ(AnkiCardStore::hashFront("cat"), AnkiCardStore::hashFront("cat"));
   EXPECT_NE(AnkiCardStore::hashFront("cat"), AnkiCardStore::hashFront("dog"));
-  EXPECT_EQ(sizeof(AnkiProgressRecord), 12u);  // layout is shared with the host tool
+  EXPECT_EQ(sizeof(AnkiProgressRecord), 12u);  // progress.bin is a fixed-slot file
 }
 
 TEST(AnkiCardStore, ScanDecksFindsDecksUnderBothRoots) {
@@ -285,14 +272,14 @@ TEST(AnkiCardStore, CountCardsCountsRecords) {
   EXPECT_EQ(AnkiCardStore::countCards("/cards/demo"), 2u);
 }
 
-TEST(AnkiCardStore, RecordGradeWritesASrsRecord) {
+TEST(AnkiCardStore, RecordGradeWritesASchedule) {
   fake::reset();
   fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
   AnkiCardStore store;
   ASSERT_TRUE(store.open("/cards/demo"));
-  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Good, kNow));
+  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
 
-  // header (8 bytes) + one record (12 bytes)
+  // header (magic + version + record size + session counter) + one record
   ASSERT_TRUE(fake::files.count("/cards/demo/progress.bin"));
   EXPECT_EQ(fake::files["/cards/demo/progress.bin"]->bytes.size(),
             AnkiCardStore::PROGRESS_HEADER_BYTES + sizeof(AnkiProgressRecord));
@@ -301,9 +288,8 @@ TEST(AnkiCardStore, RecordGradeWritesASrsRecord) {
   ASSERT_TRUE(store.loadProgress(0, record));
   EXPECT_EQ(record.frontHash, AnkiCardStore::hashFront("cat"));
   EXPECT_EQ(record.repetitions, 1u);
-  EXPECT_EQ(record.intervalDays, 1u);
+  EXPECT_EQ(record.dueAtSession, kSession + kGap);
   EXPECT_EQ(record.againCount, 0u);
-  EXPECT_EQ(record.lastReviewed, kNow);
 }
 
 TEST(AnkiCardStore, RecordGradeDropsProgressFromDifferentText) {
@@ -313,18 +299,17 @@ TEST(AnkiCardStore, RecordGradeDropsProgressFromDifferentText) {
   fake::add("/cards/demo/cards.tsv", "dog\tinu\n");
   AnkiCardStore store;
   ASSERT_TRUE(store.open("/cards/demo"));
-  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kNow));
+  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
 
   fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
   ASSERT_TRUE(store.open("/cards/demo"));
-  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Good, kNow + kDay));
+  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession + 1, kGap));
 
   AnkiProgressRecord record;
   ASSERT_TRUE(store.loadProgress(0, record));
   EXPECT_EQ(record.frontHash, AnkiCardStore::hashFront("cat"));
-  EXPECT_EQ(record.repetitions, 1u);
-  EXPECT_EQ(record.intervalDays, 1u);
-  EXPECT_EQ(record.lastReviewed, kNow + kDay);
+  EXPECT_EQ(record.repetitions, 1u);  // not 2: the stale schedule was dropped
+  EXPECT_EQ(record.dueAtSession, kSession + 1 + kGap);
 }
 
 TEST(AnkiCardStore, RecordGradeAgainResetsTheStoredSchedule) {
@@ -332,15 +317,14 @@ TEST(AnkiCardStore, RecordGradeAgainResetsTheStoredSchedule) {
   fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
   AnkiCardStore store;
   ASSERT_TRUE(store.open("/cards/demo"));
-  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kNow));
-  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Again, kNow + kDay));
+  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
+  EXPECT_TRUE(store.recordGrade(0, AnkiGrade::Again, kSession + 1, kGap));
 
   AnkiProgressRecord record;
   ASSERT_TRUE(store.loadProgress(0, record));
   EXPECT_EQ(record.repetitions, 0u);
-  EXPECT_EQ(record.intervalDays, 0u);
+  EXPECT_EQ(record.dueAtSession, kSession + 1);  // due again immediately
   EXPECT_EQ(record.againCount, 1u);
-  EXPECT_EQ(record.lastReviewed, kNow + kDay);
 }
 
 TEST(AnkiCardStore, LoadProgressRejectsACorruptFile) {
@@ -358,52 +342,107 @@ TEST(AnkiCardStore, LoadProgressRejectsACorruptFile) {
 TEST(AnkiCardStore, RecordGradeFailsOnAnEmptyDeck) {
   fake::reset();
   AnkiCardStore store;
-  EXPECT_FALSE(store.recordGrade(0, AnkiGrade::Good, kNow));
+  EXPECT_FALSE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
+}
+
+TEST(AnkiCardStore, BeginSessionCreatesAndIncrementsTheCounter) {
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+
+  uint32_t session = 0;
+  ASSERT_TRUE(store.beginSession(session));
+  EXPECT_EQ(session, 1u);
+  ASSERT_TRUE(store.beginSession(session));
+  EXPECT_EQ(session, 2u);
+
+  // The counter lives on the card, so a fresh store (the next visit, after a
+  // reboot or a deep-sleep wake) continues the sequence instead of restarting.
+  AnkiCardStore reopened;
+  ASSERT_TRUE(reopened.open("/cards/demo"));
+  ASSERT_TRUE(reopened.beginSession(session));
+  EXPECT_EQ(session, 3u);
+}
+
+TEST(AnkiCardStore, BeginSessionReplacesAFileFromAnOlderLayout) {
+  // v1 stored day intervals and had a shorter header. The record offsets depend
+  // on the header size, so a stale file must be replaced, never appended to.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
+  const std::string v1Header = std::string("CPAK\x01\x00\x0c\x00", 8) + std::string(12, '\0');
+  fake::add("/cards/demo/progress.bin", v1Header);
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+
+  uint32_t session = 0;
+  ASSERT_TRUE(store.beginSession(session));
+  EXPECT_EQ(session, 1u);
+
+  // The rewritten file is readable and carries an empty slot for the card.
+  AnkiProgressRecord record;
+  ASSERT_TRUE(store.loadProgress(0, record));
+  EXPECT_EQ(record.frontHash, 0u);
+  EXPECT_EQ(record.dueAtSession, 0u);
+  EXPECT_TRUE(AnkiSrs::isDue(record, session));
+}
+
+TEST(AnkiCardStore, BeginSessionFailsOnAnEmptyDeck) {
+  fake::reset();
+  AnkiCardStore store;
+  uint32_t session = 99;
+  EXPECT_FALSE(store.beginSession(session));
+  EXPECT_EQ(session, 0u);
 }
 
 // ---------------------------------------------------------------------------
 // The review screen's queue: which cards the user can actually reach.
 // ---------------------------------------------------------------------------
 
-TEST(AnkiReviewQueue, DueOnlyQueueShrinksAsCardsAreScheduled) {
+TEST(AnkiReviewQueue, KnownCardsLeaveTheDueQueueUntilTheGapElapses) {
   fake::reset();
   fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour", "five\tsix"}));
   AnkiCardStore store;
   ASSERT_TRUE(store.open("/cards/demo"));
 
   std::vector<size_t> queue;
-  buildReviewQueue(store, kNow, true, queue);
+  buildReviewQueue(store, kSession, true, queue);
   ASSERT_EQ(queue.size(), 3u);  // nothing reviewed yet -> every card is due
 
-  // Answering a card "I know" starts its interval, so a *due only* build must
-  // not offer it again.
-  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, kNow));
-  buildReviewQueue(store, kNow, true, queue);
+  // "I know" parks the card for kGap visits, so a *due only* build must not
+  // offer it again until then.
+  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, kSession, kGap));
+  buildReviewQueue(store, kSession, true, queue);
   ASSERT_EQ(queue.size(), 2u);
   EXPECT_EQ(queue[0], 0u);
   EXPECT_EQ(queue[1], 2u);
 
-  // "Review all" (Confirm on the Review complete screen) lists every card,
-  // which is how the user gets back into a deck whose cards are scheduled.
-  buildReviewQueue(store, kNow, false, queue);
+  buildReviewQueue(store, kSession + kGap - 1, true, queue);
+  EXPECT_EQ(queue.size(), 2u);  // still parked on the visit before the gap
+  buildReviewQueue(store, kSession + kGap, true, queue);
+  EXPECT_EQ(queue.size(), 3u);  // back on the gap-th visit
+
+  // "Review all" (Confirm on the Review complete screen) deliberately ignores
+  // the schedule, which is how the user drills a deck out of turn.
+  buildReviewQueue(store, kSession, false, queue);
   ASSERT_EQ(queue.size(), 3u);
   EXPECT_EQ(queue[0], 0u);
   EXPECT_EQ(queue[1], 1u);
   EXPECT_EQ(queue[2], 2u);
 }
 
-TEST(AnkiReviewQueue, DueOnlyQueueIsEmptyWhenEverythingIsScheduled) {
+TEST(AnkiReviewQueue, DueOnlyQueueIsEmptyWhenEverythingIsParked) {
   fake::reset();
   fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour"}));
   AnkiCardStore store;
   ASSERT_TRUE(store.open("/cards/demo"));
-  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kNow));
-  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, kNow));
+  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
+  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, kSession, kGap));
 
   std::vector<size_t> queue;
-  buildReviewQueue(store, kNow, true, queue);
+  buildReviewQueue(store, kSession, true, queue);
   EXPECT_TRUE(queue.empty());  // -> the review screen shows "Nothing due"
 
-  buildReviewQueue(store, kNow, false, queue);
+  buildReviewQueue(store, kSession, false, queue);
   EXPECT_EQ(queue.size(), 2u);  // -> Confirm starts a fresh full-deck session
 }

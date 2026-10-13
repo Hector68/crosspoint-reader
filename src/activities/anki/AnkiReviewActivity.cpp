@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <ctime>
 
+#include "CrossPointSettings.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -31,20 +31,26 @@ AnkiReviewActivity::AnkiReviewActivity(GfxRenderer& renderer, MappedInputManager
 void AnkiReviewActivity::onEnter() {
   Activity::onEnter();
 
-  nowEpoch_ = static_cast<uint32_t>(time(nullptr));
-
   if (!store_.open(deck_.folder)) {
     missingDeck_ = true;
     draw();
     return;
   }
 
-  buildQueue(true);
+  // One deck entry is one session. The counter is persisted, so a "I know"
+  // postponement survives reboots and deep sleep (the X4 has no clock, see
+  // docs/anki-cards.md). When the counter cannot be written, review everything
+  // instead of hiding cards behind a schedule the device cannot keep.
+  const bool haveSession = store_.beginSession(session_);
+  if (!haveSession) {
+    LOG_ERR("ANKI", "No session counter for %s; showing every card", deck_.folder.c_str());
+  }
+  buildQueue(haveSession);
   if (!queue_.empty()) showCard(queue_[0]);
   // Heap ledger for field reports: this is the peak for the screen, with the
   // deck's line offsets (4 bytes per card) and the due queue both resident.
-  LOG_INF("MEM", "anki review enter: free=%u max_block=%u", static_cast<unsigned>(ESP.getFreeHeap()),
-          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  LOG_INF("MEM", "anki review enter: free=%u max_block=%u session=%u", static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()), static_cast<unsigned>(session_));
   draw();
 }
 
@@ -61,10 +67,9 @@ void AnkiReviewActivity::buildQueue(const bool dueOnly) {
   queue_.clear();
   queuePos_ = 0;
   current_ = SIZE_MAX;
-  knownCount_ = 0;
   flipped_ = false;
 
-  buildReviewQueue(store_, nowEpoch_, dueOnly, queue_);
+  buildReviewQueue(store_, session_, dueOnly, queue_);
   if (!queue_.empty()) showCard(queue_[0]);
 }
 
@@ -82,13 +87,11 @@ void AnkiReviewActivity::showCard(const size_t index) {
 void AnkiReviewActivity::answer(const AnkiGrade grade) {
   if (current_ == SIZE_MAX) return;
 
-  if (!store_.recordGrade(current_, grade, nowEpoch_)) {
+  if (!store_.recordGrade(current_, grade, session_, SETTINGS.ankiMinSessions)) {
     LOG_ERR("ANKI", "Could not persist progress for card %zu of %s", current_, deck_.folder.c_str());
   }
 
-  if (grade == AnkiGrade::Good) {
-    ++knownCount_;
-  } else if (queue_.size() < AnkiCardStore::MAX_CARDS_PER_DECK) {
+  if (grade == AnkiGrade::Again && queue_.size() < AnkiCardStore::MAX_CARDS_PER_DECK) {
     // Not known yet: show it again at the end of this session.
     queue_.push_back(current_);
   }

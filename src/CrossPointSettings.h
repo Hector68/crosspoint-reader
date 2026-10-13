@@ -297,6 +297,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
   uint8_t hyphenationEnabled = 0;
+  // Anki cards: how many deck visits a card answered "I know" stays out of the
+  // due queue (see docs/anki-cards.md). The X4 has no RTC and nothing seeds the
+  // system clock, so the schedule is counted in visits rather than days.
+  uint8_t ankiMinSessions = DEFAULT_ANKI_MIN_SESSIONS;
 
   // Reader screen margin settings
   static constexpr uint8_t SCREEN_MARGIN_MIN = 5;
@@ -379,6 +383,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
+
+  // Anki: bounds of the "park a known card for N visits" setting.
+  static constexpr uint8_t MIN_ANKI_MIN_SESSIONS = 1;
+  static constexpr uint8_t MAX_ANKI_MIN_SESSIONS = 30;
+  static constexpr uint8_t DEFAULT_ANKI_MIN_SESSIONS = 4;
 
   // Callback to resolve SD card font IDs. Set by SdCardFontSystem::begin().
   // Returns font ID or 0 if not found.

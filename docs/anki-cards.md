@@ -107,29 +107,48 @@ pick a deck → review.
 The last row of the deck list is **Browse All**, which opens the plugin
 catalog, so OPDS/plugins stay reachable.
 
-## Spaced repetition (device side, integer-only)
+## Scheduling (device side, counted in deck visits)
 
-`progress.bin` holds fixed 12-byte records:
+`progress.bin` starts with a 12-byte header — `magic u32`, `version u16` (= 2),
+`recordSize u16`, **`sessionCounter u32`** — followed by one fixed 12-byte record
+per card:
 
 | field | type | meaning |
 | --- | --- | --- |
 | `frontHash` | u32 | FNV-1a/32 of the front text |
-| `intervalDays` | u16 | current interval |
-| `repetitions` | u8 | successful repetitions |
-| `againCount` | u8 | times answered “I don't know” |
-| `lastReviewed` | u32 | unix epoch of the last answer |
+| `dueAtSession` | u32 | deck visit this card becomes due again; 0 = never scheduled |
+| `repetitions` | u8 | consecutive “I know” answers |
+| `againCount` | u8 | “I don't know” answers |
+| `reserved` | u16 | padding, keeps the record 12 bytes and 4-byte aligned |
 
-* intervals follow the ladder `{0, 1, 3, 7, 15, 30, 60, 120}` days (SM-2-lite);
-* “I know” moves one step up the ladder, “I don't know” resets it and bumps
-  `againCount`;
-* a card is *due* when `now >= lastReviewed + intervalDays*86400`, and is always
-  due when it was never answered or answered “I don't know”;
-* if the clock was never set (`now < 946684800`, i.e. before 2000-01-01) all
-  intervals are ignored and every card stays reviewable, rather than being
-  locked away behind an interval the device cannot count;
+**Why visits and not days.** The Xteink X4 has no RTC chip, and nothing in the
+firmware seeds the system clock from one (the I2C `Rtc` is a PCF8563 the X4 does
+not populate, and `HalClock::syncFromNTP()` returns early without it, so
+`configTzTime()` never runs). `time()` therefore never reaches a real date, and a
+day-based interval would leave every card permanently due. Counting deck visits
+needs no clock at all and survives reboots and deep sleep, because the counter
+lives on the SD card.
+
+* one **session** = one entry into a deck; the counter is bumped and persisted by
+  `AnkiCardStore::beginSession()` before the first card is shown;
+* “I know” parks the card until `session + N`, where N is the Settings value
+  (Settings → **Reader** → *Anki: pause "I know" cards*, default 4, range 1–30);
+  the gap is **fixed**, not a growing ladder — with visits as the unit a growing
+  one would hide a well-known card for months;
+* “I don't know” sets `dueAtSession = session`, so the card is due immediately
+  and also comes back at the end of the current session;
+* a card is *due* when `dueAtSession == 0` (never answered) or
+  `dueAtSession <= session`;
+* **Review all** (Confirm on the *Review complete* screen) deliberately ignores
+  `dueAtSession` and lists every card, which is how a deck is drilled out of turn;
+* if the counter cannot be written, the screen falls back to showing every card
+  rather than hiding cards behind a schedule the device cannot keep;
 * progress is keyed by `frontHash`, so if the host regenerates a deck with
   different front text the stale record is discarded instead of being applied
-  to a different card.
+  to a different card;
+* a `progress.bin` from the older day-based layout (version 1, 8-byte header) is
+  **replaced** on the next deck entry: the record offsets depend on the header
+  size, so such a file must never be appended to.
 
 ## Firmware changes / how to re-apply after an upstream update
 
@@ -143,11 +162,12 @@ is deliberately additive:
 * touched files: `src/activities/ActivityManager.{h,cpp}` (menu item +
   `goToAnki()`), `src/activities/home/HomeActivity.{h,cpp}` (the library slot),
   `lib/I18n/translations/english.yaml` (new `STR_*` keys);
-* new i18n keys: `STR_ANKI_CARDS`, `STR_NO_CARDS_FOUND`, `STR_BROWSE_ALL`,
-  `STR_N_CARDS`, `STR_FLIP`, `STR_KNOW`, `STR_DONT_KNOW`, `STR_CARD_N_OF_M`,
+* new i18n keys: `STR_ANKI_CARDS`, `STR_NO_CARDS_FOUND`, `STR_N_CARDS`,
+  `STR_FLIP`, `STR_KNOW`, `STR_DONT_KNOW`, `STR_CARD_N_OF_M`,
   `STR_DECK_NOT_FOUND`, `STR_REVIEW_COMPLETE`, `STR_CARD_UNREADABLE`,
-  `STR_IMAGE_TOO_LARGE`, `STR_ANKI_IMPORT_HINT` (English only; other languages
-  fall back to English until the keys are translated).
+  `STR_IMAGE_TOO_LARGE`, `STR_REVIEW_ALL`, `STR_NOTHING_DUE`,
+  `STR_ANKI_MIN_SESSIONS`, `STR_ANKI_MIN_SESSIONS_VALUE_FORMAT` (English only;
+  other languages fall back to English until the keys are translated).
 
 To re-apply on a newer upstream tree: copy the *new files* back as-is, then
 re-make the small edits listed above (the diff is small and localised; the

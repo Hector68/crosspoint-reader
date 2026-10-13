@@ -315,6 +315,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_READER_MENU_STYLE, &CrossPointSettings::readerMenuStyle,
                           {StrId::STR_MENU_STYLE_LIST, StrId::STR_MENU_STYLE_TOOLBAR}, "readerMenuStyle",
                           StrId::STR_CAT_READER),
+        // Anki cards: how many deck visits a card answered "I know" stays out of
+        // the due queue. The X4 has no clock, so the schedule counts visits.
+        SettingInfo::Value(StrId::STR_ANKI_MIN_SESSIONS, &CrossPointSettings::ankiMinSessions,
+                           {CrossPointSettings::MIN_ANKI_MIN_SESSIONS, CrossPointSettings::MAX_ANKI_MIN_SESSIONS, 1},
+                           "ankiMinSessions", StrId::STR_CAT_READER),
         // --- Controls ---
         SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
                           {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED, StrId::STR_NEXT_NEXT,
