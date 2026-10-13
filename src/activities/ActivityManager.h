@@ -17,7 +17,10 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+// ANKI_CARDS is the home "library" slot when card decks are present on the SD
+// card; without decks the same slot stays the OPDS browser (see
+// docs/anki-cards.md).
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, ANKI_CARDS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -87,6 +90,7 @@ class ActivityManager {
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
+  void goToAnki();
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();

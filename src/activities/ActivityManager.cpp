@@ -12,6 +12,7 @@
 
 #include "CrossPointSettings.h"
 #include "OpdsServerStore.h"
+#include "anki/AnkiDeckListActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -287,6 +288,15 @@ void ActivityManager::goToBrowser() {
   }
 }
 
+void ActivityManager::goToAnki() {
+  auto activity = makeUniqueNoThrow<AnkiDeckListActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: anki deck list activity");
+    return;
+  }
+  replaceActivity(std::move(activity));
+}
+
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
   if (path.empty()) {
     goToFileBrowser("/");
@@ -329,6 +339,8 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::LIBRARY;
     } else if (activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
+    } else if (activityName == "AnkiDecks") {
+      initialMenuItem = HomeMenuItem::ANKI_CARDS;
     } else if (activityName == "CrossPointWebServer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "Settings") {

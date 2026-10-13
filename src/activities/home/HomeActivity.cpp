@@ -22,6 +22,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "anki/AnkiCards.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -30,7 +31,7 @@ int HomeActivity::getMenuItemCount() const {
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
-  if (hasOpdsServers) {
+  if (hasLibrarySlot()) {
     count++;
   }
   return count;
@@ -229,6 +230,7 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   hasOpdsServers = OPDS_STORE.hasServers();
+  hasAnkiDecks = AnkiCardStore::hasAnyDeck();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   if (UITheme::getInstance().hasCoverGridHome()) {
@@ -241,11 +243,12 @@ void HomeActivity::onEnter() {
   if (coverGridUi) {
     fillCoverGridFromLibrary();
     resolveGridCoverPaths();
-    coverGridUi->begin(recentBooks, hasOpdsServers, hasContinueReading);
+    coverGridUi->begin(recentBooks, hasLibrarySlot(), hasContinueReading);
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  selectorIndex =
+      initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasLibrarySlot());
 
   // Trigger first update
   requestUpdate();
@@ -306,12 +309,15 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasOpdsServers)) {
+    switch (indexToMenuItem(menuIndex, hasLibrarySlot(), hasAnkiDecks)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
       case HomeMenuItem::LIBRARY:
         onLibraryOpen();
+        break;
+      case HomeMenuItem::ANKI_CARDS:
+        onAnkiOpen();
         break;
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
@@ -511,8 +517,9 @@ void HomeActivity::render(RenderLock&&) {
                                         tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
 
-  if (hasOpdsServers) {
-    menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
+  // The shared slot: card decks take it when present, otherwise OPDS stays.
+  if (hasLibrarySlot()) {
+    menuItems.insert(menuItems.begin() + 2, hasAnkiDecks ? tr(STR_ANKI_CARDS) : tr(STR_OPDS_BROWSER));
     menuIcons.insert(menuIcons.begin() + 2, Blocks);
   }
 
@@ -559,3 +566,5 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onAnkiOpen() { activityManager.goToAnki(); }
