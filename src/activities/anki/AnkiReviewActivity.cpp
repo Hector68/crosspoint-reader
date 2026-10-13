@@ -103,7 +103,13 @@ void AnkiReviewActivity::answer(const AnkiGrade grade) {
 }
 
 void AnkiReviewActivity::loop() {
-  mappedInput.update();
+  // No mappedInput.update() here on purpose: the main loop already calls it once
+  // per iteration before dispatching (main.cpp), and InputManager computes its
+  // press/release edges against the previous state and then commits it
+  // (applyStateChange ends with `currentState = state`). A second update in the
+  // same iteration therefore recomputes `state & ~state` = 0 and wipes the
+  // edges, so every wasReleased() below would report nothing and no button
+  // would respond.
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
