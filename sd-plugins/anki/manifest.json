@@ -1,0 +1,6 @@
+{
+  "name": "anki",
+  "title": "Anki cards",
+  "description": "Add a deck by running scripts/anki_import.py on an Anki export; the device reads /cards/<topic>/cards.tsv and pre-rendered 1bpp images.",
+  "mount": "/cards"
+}

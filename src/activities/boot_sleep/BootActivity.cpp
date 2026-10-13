@@ -16,6 +16,10 @@ void BootActivity::onEnter() {
   renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
   renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSPOINT), true, EpdFontFamily::BOLD);
   renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_BOOTING));
-  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight - 30, CROSSPOINT_VERSION);
+  // Fork identity, shown under the logo. CROSSPOINT_VERSION stays the plain
+  // upstream version string (the OTA updater compares it against upstream
+  // release versions), so the fork name is concatenated here, where the
+  // firmware names itself to the user.
+  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight - 30, CROSSPOINT_VERSION " Hector Edition");
   renderer.displayBuffer();
 }

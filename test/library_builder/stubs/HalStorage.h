@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+// The Anki deck store opens its progress file read-write. The firmware's
+// HalStorage exposes the same flag names (via SdFat), so the fake mirrors them.
+inline constexpr int O_WRONLY = 1, O_CREAT = 2, O_TRUNC = 4, O_APPEND = 8, O_RDWR = 16, O_AT_END = 32;
+
 namespace fake {
 
 struct Node {
@@ -194,6 +198,16 @@ class HalStorage {
       file.path = path;
     }
     return file;
+  }
+  HalFile open(const char* path, const int flags) {
+    if (!exists(path) && (flags & O_CREAT)) fake::add(path, "");
+    auto file = open(path);
+    if (file && (flags & O_TRUNC)) file.node->bytes.clear();
+    if (file && (flags & (O_APPEND | O_AT_END))) file.pos = file.node->bytes.size();
+    return file;
+  }
+  bool openFileForRead(const char* module, const std::string& path, HalFile& file) {
+    return openFileForRead(module, path.c_str(), file);
   }
   bool openFileForRead(const char*, const char* path, HalFile& file) {
     file = open(path);

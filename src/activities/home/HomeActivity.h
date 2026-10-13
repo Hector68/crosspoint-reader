@@ -18,6 +18,7 @@ class HomeActivity final : public Activity {
   bool recentsLoaded = false;
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
+  bool hasAnkiDecks = false;
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -34,27 +35,33 @@ class HomeActivity final : public Activity {
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
+  // The home "library" slot (index 2) shows the Anki deck list when card decks
+  // are present on the SD card, otherwise the OPDS browser. The index
+  // converters and the renderer both gate on its presence.
+  bool hasLibrarySlot() const { return hasAnkiDecks || hasOpdsServers; }
+
   // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
+  static int menuItemToIndex(HomeMenuItem item, bool slotPresent) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
     ++i;
     if (item == HomeMenuItem::LIBRARY) return i;
     ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
+    if (item == HomeMenuItem::ANKI_CARDS || item == HomeMenuItem::OPDS_BROWSER) return slotPresent ? i : 0;
+    if (slotPresent) ++i;
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
     ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     return 0;
   }
 
-  // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
+  // Convert menu index to HomeMenuItem (used in loop). ankiSlot says what the
+  // shared slot currently stands for.
+  static HomeMenuItem indexToMenuItem(int idx, bool slotPresent, bool ankiSlot) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+    if (slotPresent && idx == i++) return ankiSlot ? HomeMenuItem::ANKI_CARDS : HomeMenuItem::OPDS_BROWSER;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
@@ -65,6 +72,7 @@ class HomeActivity final : public Activity {
   void onSettingsOpen();
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
+  void onAnkiOpen();
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image
