@@ -248,6 +248,52 @@ TEST(AnkiCardStore, ReadCardTreatsThreeTextFieldsAsWordTranscriptionTranslate) {
   EXPECT_TRUE(card.image.empty());
 }
 
+TEST(AnkiCardStore, ReadCardReadsFourTextFieldsWithContext) {
+  // word, transcription, translate, context -- no picture. The 4th field is not
+  // an image name, so it is text, not the image.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "apple\tAP-ul\tyabloko\tShe ate an apple for breakfast.\n");
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  AnkiCard card;
+  ASSERT_TRUE(store.readCard(0, card));
+  EXPECT_EQ(card.word, "apple");
+  EXPECT_EQ(card.transcription, "AP-ul");
+  EXPECT_EQ(card.translate, "yabloko");
+  EXPECT_EQ(card.context, "She ate an apple for breakfast.");
+  EXPECT_TRUE(card.image.empty());
+}
+
+TEST(AnkiCardStore, ReadCardKeepsTheImageLastWhenContextIsPresent) {
+  // The full five positions: the picture stays last, so the field before it is
+  // context rather than an image name.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "apple\tAP-ul\tyabloko\tShe ate an apple for breakfast.\tapple.bmp\n");
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  AnkiCard card;
+  ASSERT_TRUE(store.readCard(0, card));
+  EXPECT_EQ(card.word, "apple");
+  EXPECT_EQ(card.transcription, "AP-ul");
+  EXPECT_EQ(card.translate, "yabloko");
+  EXPECT_EQ(card.context, "She ate an apple for breakfast.");
+  EXPECT_EQ(card.image, "apple.bmp");
+}
+
+TEST(AnkiCardStore, ReadCardTreatsATrailingEmptyFieldAsAnEmptyContext) {
+  // An empty trailing field is not an image name, so a four-field record with a
+  // dangling tab reads as an (empty) context rather than as a picture.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "apple\tAP-ul\tyabloko\t\n");
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  AnkiCard card;
+  ASSERT_TRUE(store.readCard(0, card));
+  EXPECT_EQ(card.translate, "yabloko");
+  EXPECT_TRUE(card.context.empty());
+  EXPECT_TRUE(card.image.empty());
+}
+
 TEST(AnkiCardStore, ReadCardRejectsRecordsWithoutATab) {
   fake::reset();
   fake::add("/cards/demo/cards.tsv", "this is not a card\n");

@@ -28,12 +28,14 @@
 #include <string>
 #include <vector>
 
-// One card = one vocabulary entry. The review screen shows word + transcription
-// + image first (the prompt), then image + translate after the flip.
+// One card = one vocabulary entry. The front side shows the optional context
+// sentence (a thin rule separates it from the rest), then word + transcription +
+// image; the back shows image + translate.
 struct AnkiCard {
   std::string word;           // big text, e.g. "To be a fashion slave"
   std::string transcription;  // smaller text, e.g. "/tuː biː ə ˈfæʃən sleɪv/"
   std::string translate;      // e.g. "Быть рабом моды"
+  std::string context;        // optional sentence the word appears in; front side only
   std::string image;          // file name inside the deck folder; empty = no image
 };
 

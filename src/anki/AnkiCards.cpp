@@ -275,7 +275,9 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
     return false;
   }
   // Read the whole maximum-size record in one call: one SD read per card shown.
-  char line[MAX_FIELD_BYTES * 2 + MAX_IMAGE_NAME_BYTES + 10];
+  // Sized for four text fields plus an image name, the longest record the format
+  // allows (2 KB on the stack, the same order as the rest of the firmware).
+  char line[MAX_FIELD_BYTES * 4 + MAX_IMAGE_NAME_BYTES + 10];
   const int n = file.read(line, sizeof(line) - 1);
   file.close();
   if (n <= 0) return false;
@@ -290,12 +292,12 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) line[--length] = '\0';
 
   // Fields are plain text; the host tool guarantees no tabs/newlines inside
-  // them. At most four are split, which is the longest supported record.
-  const char* fields[4] = {nullptr, nullptr, nullptr, nullptr};
+  // them. At most five are split, which is the longest supported record.
+  const char* fields[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   size_t fieldCount = 0;
   char* p = line;
   size_t remaining = length;
-  while (fieldCount < 4) {
+  while (fieldCount < 5) {
     fields[fieldCount++] = p;
     char* tab = remaining > 0 ? static_cast<char*>(memchr(p, '\t', remaining)) : nullptr;
     if (!tab) break;
@@ -305,21 +307,26 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   }
   if (fieldCount < 2) return false;  // a record without a tab is not a card
 
-  // Four fields are the canonical layout (word, transcription, translate,
-  // image). Three fields are ambiguous, so the last one decides: an image file
-  // name means the record is in Anki's own export shape (front, back, image —
-  // what scripts/anki_import.py writes), anything else means it is
-  // word/transcription/translate (a deck without a picture).
+  // An optional picture always comes last, and the number of remaining text
+  // fields picks the meaning:
+  //   2 = word, translate              (Anki's own Front/Back export)
+  //   3 = word, transcription, translate
+  //   4 = word, transcription, translate, context
+  // The picture is recognised by its file extension. That is what keeps Anki's
+  // own three-field shape (front, back, image) apart from a three-field record
+  // that carries a transcription instead.
   size_t textFields = fieldCount;
-  if (fieldCount == 4) {
-    out.image = fields[3];  // a missing picture is written as an empty field
-    textFields = 3;
-  } else if (fieldCount == 3 && looksLikeImageName(fields[2])) {
-    out.image = fields[2];
-    textFields = 2;
+  if (looksLikeImageName(fields[fieldCount - 1])) {
+    out.image = fields[fieldCount - 1];
+    textFields = fieldCount - 1;
   }
 
-  if (textFields >= 3) {
+  if (textFields >= 4) {
+    out.word = fields[0];
+    out.transcription = fields[1];
+    out.translate = fields[2];
+    out.context = fields[3];
+  } else if (textFields == 3) {
     out.word = fields[0];
     out.transcription = fields[1];
     out.translate = fields[2];
@@ -333,7 +340,7 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   if (out.word.empty()) return false;
 
   if (out.word.size() > MAX_FIELD_BYTES || out.transcription.size() > MAX_FIELD_BYTES ||
-      out.translate.size() > MAX_FIELD_BYTES) {
+      out.translate.size() > MAX_FIELD_BYTES || out.context.size() > MAX_FIELD_BYTES) {
     LOG_ERR("ANKI", "Card %u in %s exceeds the %u-byte field limit", static_cast<unsigned>(index), title_.c_str(),
             static_cast<unsigned>(MAX_FIELD_BYTES));
   }

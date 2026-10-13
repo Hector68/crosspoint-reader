@@ -12,6 +12,8 @@ working on the Xteink X4 (no PSRAM, ~380 KB RAM).
                               front<TAB>back[<TAB>image]
                               or, with a pronunciation hint:
                               word<TAB>transcription<TAB>translate[<TAB>image]
+                              or the full form, with an example sentence:
+                              word<TAB>transcription<TAB>translate<TAB>context[<TAB>image]
 /cards/<topic>/img_001.bmp    pre-rendered 1bpp images (last field)
 /cards/<topic>/progress.bin   SRS state, written by the device
 ```
@@ -24,11 +26,12 @@ step:
 cp -R sd-plugins/anki fs_/plugins/anki   # simulator SD root; /Volumes/<card> on a real reader
 ```
 
-`sd-plugins/anki/cards` ships two decks (`english-japanese`, three fields with
-one picture, and `english-russian`, four fields with one picture per card), and
-both appear in the deck list after that copy. Decks are **indexed, never
-loaded**: only the byte offset of every line is kept in RAM (4 bytes per card,
-max 1024 cards/deck, 32 decks).
+`sd-plugins/anki/cards` ships three decks: `english-japanese` (three fields,
+one picture), `english-russian` (four fields, one picture per card) and
+`english-context` (the five-field form with an example sentence, plus one card
+that has no picture). All of them appear in the deck list after that copy. Decks
+are **indexed, never loaded**: only the byte offset of every line is kept in RAM
+(4 bytes per card, max 1024 cards/deck, 32 decks).
 
 `cards.tsv` is exactly Anki's own export shape — fields separated by TABs, one
 record per line — with two extra rules the host tool enforces:
@@ -38,14 +41,29 @@ record per line — with two extra rules the host tool enforces:
 * a field must not exceed 480 bytes (truncated at a UTF-8 boundary).
 
 How the fields are read: the **last** field is the picture when it names a
-`.bmp`/`.png`/`.jpg` file. That is what tells the two three-field shapes apart —
-`front<TAB>back<TAB>img.bmp` (Anki's own export, no pronunciation hint) and
-`word<TAB>transcription<TAB>translate` (a deck without pictures). Two fields are
-`word<TAB>translate`; four are the full `word<TAB>transcription<TAB>translate<TAB>image`.
+`.bmp`/`.png`/`.jpg` file. Everything before it is text, and the number of text
+fields picks the layout — two are `word<TAB>translate` (Anki's own Front/Back
+export), three are `word<TAB>transcription<TAB>translate`, and four are
+`word<TAB>transcription<TAB>translate<TAB>context`. The picture is optional and
+always last, so the full five-field form is
+`word<TAB>transcription<TAB>translate<TAB>context<TAB>image`. The extension is
+what tells Anki's own three-field shape (`front<TAB>back<TAB>img.bmp`, no
+pronunciation hint) apart from a three-field record that carries a transcription
+instead.
 
-On the review screen the front shows the word (plus the pronunciation hint when
-there is one) and the picture; the back shows the translation and the picture.
-The title of the front side is never the translation of the card.
+The `context` field is a sentence the word appears in. It is shown on the front
+side only, in italic at the top of the card, separated from the word below by a
+thin inset rule. It is rendered with the same limit as the other text fields, so
+one short sentence (10–15 words) is the right size.
+
+On the review screen the front shows, from the top: the `context` sentence when
+the card has one (italic, above a thin inset rule), then the word (plus the
+pronunciation hint when there is one) and the picture; the back shows the
+translation and the picture. The context is not repeated on the back, and the
+front never shows the translation.
+
+To have a model write a deck from scratch instead of exporting one, use the
+copy-paste prompt in [anki-cards-prompt.md](anki-cards-prompt.md).
 
 ### Why BMP and not PNG
 

@@ -23,6 +23,10 @@ constexpr int TEXT_LINE_GAP = 2;
 // Blank space between the card text and the picture. The picture is the last
 // thing in the block, so without it the artwork sits flush against the word.
 constexpr int IMAGE_TOP_GAP = 8;
+// The optional context sentence on the front side sits above the word and is set
+// apart from it by a thin rule, with this much air on either side.
+constexpr int CONTEXT_RULE_GAP = 6;
+constexpr int CONTEXT_RULE_THICKNESS = 1;
 }  // namespace
 
 AnkiReviewActivity::AnkiReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, AnkiDeckRef deck)
@@ -170,11 +174,12 @@ void AnkiReviewActivity::draw() {
     renderer.drawCenteredText(UI_10_FONT_ID, (y + bottom) / 2,
                               I18N.get(reviewedAnything_ ? StrId::STR_REVIEW_COMPLETE : StrId::STR_NOTHING_DUE));
   } else {
-    // Side A (before the flip): Word (large) + Transcription (smaller) + Image.
-    // Side B (after the flip): Translate + Image. The main line is pinned to
-    // the top of the content area, so the word — and, after the flip, the
-    // translation — always starts in the same place; the pronunciation hint
-    // and the picture follow underneath. Text is centred horizontally only.
+    // Side A (before the flip): Context (optional) + Word (large) + Transcription
+    // (smaller) + Image. Side B (after the flip): Translate + Image. The block is
+    // pinned to the top of the content area rather than centred, so the word —
+    // and, after the flip, the translation — always starts in the same place; the
+    // context, the hint and the picture follow in order. Text is centred
+    // horizontally only.
     const bool wordSide = !flipped_;
     const int mainFont = wordSide ? NOTOSERIF_18_FONT_ID : NOTOSERIF_14_FONT_ID;
     const std::string mainText = wordSide ? card_.word : card_.translate;
@@ -208,10 +213,21 @@ void AnkiReviewActivity::draw() {
     if (!subText.empty()) {
       subLines = renderer.wrappedText(NOTOSERIF_14_FONT_ID, subText.c_str(), textWidth, CARD_TEXT_LINES);
     }
+    // Front side only: the sentence the word appears in, drawn above the word
+    // and separated from it by a thin rule (see docs/anki-cards.md).
+    std::vector<std::string> contextLines;
+    if (wordSide && !card_.context.empty()) {
+      contextLines = renderer.wrappedText(NOTOSERIF_14_FONT_ID, card_.context.c_str(), textWidth, CARD_TEXT_LINES);
+    }
     const int mainStep = renderer.getTextHeight(mainFont) + TEXT_LINE_GAP;
     const int subStep = renderer.getTextHeight(NOTOSERIF_14_FONT_ID) + TEXT_LINE_GAP;
+    const int contextStep = subStep;
+    const int contextBlock = contextLines.empty()
+                                 ? 0
+                                 : static_cast<int>(contextLines.size()) * contextStep + 2 * CONTEXT_RULE_GAP +
+                                       CONTEXT_RULE_THICKNESS;
     const int textHeight =
-        static_cast<int>(mainLines.size()) * mainStep + static_cast<int>(subLines.size()) * subStep;
+        contextBlock + static_cast<int>(mainLines.size()) * mainStep + static_cast<int>(subLines.size()) * subStep;
 
     // Fit the picture into the space the text leaves over. A deck may ship
     // artwork larger than that space, and drawBitmap scales a bitmap down to
@@ -229,9 +245,22 @@ void AnkiReviewActivity::draw() {
       }
     }
 
-    // The main line (word, or the translation after the flip) is pinned to the
-    // top of the content area; the hint and the picture follow it down.
+    // The block is pinned to the top of the content area: context first (front
+    // side only), then the word or the translation, the hint and the picture.
     int lineY = y;
+
+    for (const auto& line : contextLines) {
+      // Italic marks the sentence as an example rather than a field of the card.
+      renderer.drawCenteredText(NOTOSERIF_14_FONT_ID, lineY, line.c_str(), true, EpdFontFamily::ITALIC);
+      lineY += contextStep;
+    }
+    if (!contextLines.empty()) {
+      lineY += CONTEXT_RULE_GAP;
+      // Inset so the rule reads as a separator rather than a full-width frame.
+      const int ruleInset = textWidth / 8;
+      renderer.drawLine(safe.x + ruleInset, lineY, safe.x + textWidth - ruleInset, lineY, true);
+      lineY += CONTEXT_RULE_THICKNESS + CONTEXT_RULE_GAP;
+    }
 
     for (const auto& line : mainLines) {
       renderer.drawCenteredText(mainFont, lineY, line.c_str());
