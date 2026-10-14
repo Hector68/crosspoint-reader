@@ -492,3 +492,103 @@ TEST(AnkiReviewQueue, DueOnlyQueueIsEmptyWhenEverythingIsParked) {
   buildReviewQueue(store, kSession, false, queue);
   EXPECT_EQ(queue.size(), 2u);  // -> Confirm starts a fresh full-deck session
 }
+
+// ---------------------------------------------------------------------------
+// The deck list preview: "Cards: N, Active: M".
+// ---------------------------------------------------------------------------
+
+TEST(AnkiDeckPreview, StoredSessionReportsTheCounterWithoutBumpingIt) {
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
+  EXPECT_EQ(AnkiCardStore::storedSession("/cards/demo"), 0u);  // never reviewed
+
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  uint32_t session = 0;
+  ASSERT_TRUE(store.beginSession(session));
+  ASSERT_TRUE(store.beginSession(session));
+  EXPECT_EQ(session, 2u);
+  EXPECT_EQ(AnkiCardStore::storedSession("/cards/demo"), 2u);
+
+  // Reading it must not advance the deck: the preview runs on the list screen,
+  // long before the user picks this deck, and a peek that counted as a visit
+  // would hide a card one visit longer than the gap promises.
+  EXPECT_EQ(AnkiCardStore::storedSession("/cards/demo"), 2u);
+  ASSERT_TRUE(store.beginSession(session));
+  EXPECT_EQ(session, 3u);
+}
+
+TEST(AnkiDeckPreview, StoredSessionIsZeroForAFileFromAnOlderLayout) {
+  // beginSession() replaces such a file and starts over at zero, so the preview
+  // has to count from zero as well.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", "cat\tneko\n");
+  fake::add("/cards/demo/progress.bin", std::string("CPAK\x01\x00\x0c\x00", 8) + std::string(12, '\0'));
+  EXPECT_EQ(AnkiCardStore::storedSession("/cards/demo"), 0u);
+}
+
+TEST(AnkiDeckPreview, CountDueCardsTreatsADeckWithoutProgressAsAllNew) {
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour", "five\tsix", "seven\teight"}));
+  EXPECT_EQ(AnkiCardStore::countDueCards("/cards/demo", kSession, 4u), 4u);
+  EXPECT_EQ(AnkiCardStore::countDueCards("/cards/absent", kSession, 0u), 0u);
+}
+
+TEST(AnkiDeckPreview, CountDueCardsHidesAParkedCardUntilItsGapElapses) {
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour", "five\tsix", "seven\teight"}));
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, kSession, kGap));
+
+  EXPECT_EQ(AnkiCardStore::countDueCards("/cards/demo", kSession, 4u), 3u);  // parked
+  EXPECT_EQ(AnkiCardStore::countDueCards("/cards/demo", kSession + kGap, 4u), 4u);  // back
+}
+
+TEST(AnkiDeckPreview, CountDueCardsTreatsSlotsPastATruncatedFileAsNew) {
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour", "five\tsix"}));
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, kSession, kGap));
+
+  // Cut the file after the header and the first slot: the missing records carry
+  // no schedule, which is what a card that was never answered looks like.
+  fake::files["/cards/demo/progress.bin"]->bytes.resize(AnkiCardStore::PROGRESS_HEADER_BYTES +
+                                                         sizeof(AnkiProgressRecord));
+  EXPECT_EQ(AnkiCardStore::countDueCards("/cards/demo", kSession, 3u), 2u);
+}
+
+TEST(AnkiDeckPreview, CountDueCardsMatchesTheReviewQueue) {
+  // "Active" has to be the number the review screen really shows, for the visit
+  // beginSession() is about to hand out -- the deck list previews at
+  // storedSession() + 1. This is the test that keeps the two from drifting.
+  fake::reset();
+  fake::add("/cards/demo/cards.tsv", cardsTsv({"one\ttwo", "three\tfour", "five\tsix"}));
+  AnkiCardStore store;
+  ASSERT_TRUE(store.open("/cards/demo"));
+
+  uint32_t session = 0;
+  ASSERT_TRUE(store.beginSession(session));
+  ASSERT_TRUE(store.recordGrade(0, AnkiGrade::Good, session, kGap));
+
+  const auto preview = [&store]() {
+    return AnkiCardStore::countDueCards("/cards/demo", AnkiCardStore::storedSession("/cards/demo") + 1, 3u);
+  };
+  uint32_t previewed = preview();
+  EXPECT_EQ(previewed, 2u);
+  ASSERT_TRUE(store.beginSession(session));
+  std::vector<size_t> queue;
+  buildReviewQueue(store, session, true, queue);
+  EXPECT_EQ(previewed, queue.size());
+
+  // Park the remaining two: the preview must read 0, exactly like the review
+  // screen's "Nothing due".
+  ASSERT_TRUE(store.recordGrade(1, AnkiGrade::Good, session, kGap));
+  ASSERT_TRUE(store.recordGrade(2, AnkiGrade::Good, session, kGap));
+  previewed = preview();
+  EXPECT_EQ(previewed, 0u);
+  ASSERT_TRUE(store.beginSession(session));
+  buildReviewQueue(store, session, true, queue);
+  EXPECT_EQ(previewed, queue.size());
+}

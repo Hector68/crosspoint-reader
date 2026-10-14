@@ -121,6 +121,16 @@ void CrossPointWebServerActivity::onExit() {
 }
 
 void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) {
+  if (mode == NetworkMode::OPDS_BROWSER) {
+    // The OPDS browser is one of the rows in the File Transfer menu, because a
+    // card deck takes the home "library" slot and 1.6.5 has no plugin catalog.
+    // Nothing to start here: goToBrowser() replaces this activity (and clears the
+    // stack), so its onExit() runs with WiFi still down and does not restart the
+    // device.
+    activityManager.goToBrowser();
+    return;
+  }
+
   const char* modeName = "Join Network";
   if (mode == NetworkMode::CONNECT_CALIBRE) {
     modeName = "Connect to Calibre";

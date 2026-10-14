@@ -138,6 +138,45 @@ uint32_t AnkiCardStore::countCards(const std::string& folder) {
   return count;
 }
 
+uint32_t AnkiCardStore::storedSession(const std::string& folder) {
+  HalFile file;
+  if (!Storage.openFileForRead("ANKI", folder + "/progress.bin", file)) return 0;  // never reviewed
+  uint32_t session = 0;
+  const bool usable = readProgressHeader(file, session);
+  file.close();
+  // An unusable header means beginSession() will rewrite the file and start at
+  // zero, so reporting 0 here keeps the preview in step with that visit.
+  return usable ? session : 0;
+}
+
+uint32_t AnkiCardStore::countDueCards(const std::string& folder, const uint32_t session, const uint32_t cardCount) {
+  if (cardCount == 0) return 0;
+
+  HalFile file;
+  if (!Storage.openFileForRead("ANKI", folder + "/progress.bin", file)) {
+    return cardCount;  // no schedule on the card: every card is new
+  }
+  uint32_t stored = 0;
+  if (!readProgressHeader(file, stored)) {
+    file.close();
+    return cardCount;  // older/truncated layout: beginSession() starts it over empty
+  }
+
+  // Records are fixed-size slots in deck order, so one sequential pass answers
+  // the question — a seek per card would put a stall on the list screen.
+  uint32_t due = 0;
+  uint32_t read = 0;
+  AnkiProgressRecord record{};
+  while (read < cardCount && tryReadPod(file, record)) {
+    if (AnkiSrs::isDue(record, session)) ++due;
+    ++read;
+  }
+  file.close();
+  // Slots past the end of a truncated file carry no record, so those cards are
+  // as new as an unwritten slot — the review queue treats them the same way.
+  return due + (cardCount - read);
+}
+
 bool AnkiCardStore::scanDecks(std::vector<AnkiDeckRef>& out) {
   out.clear();
   for (const char* rootPath : CARDS_ROOTS) {

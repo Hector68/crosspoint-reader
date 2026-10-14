@@ -122,8 +122,18 @@ pick a deck → review.
 | Right | “I know” (grades the card *Good*) |
 | Left | “I don't know” (grades the card *Again*) |
 
-The last row of the deck list is **Browse All**, which opens the plugin
-catalog, so OPDS/plugins stay reachable.
+Each row is one deck; its subtitle reads **Cards: N (M)** — `N` is the number of
+records in the deck and `M` how many of them the visit would really show: the
+cards that have come due plus the ones that were never answered, i.e. exactly the
+queue the review screen builds (a card answered “I know” is parked for the
+configured gap and is not counted until it elapses). The preview is read without
+touching the schedule — it counts at the stored visit counter + 1, which is the
+visit `beginSession()` is about to hand out — so opening the list never advances a
+deck. The bracketed number introduces no translatable string of its own.
+
+The OPDS browser used to be the last row of this list. It now lives in the File
+Transfer menu — Home → **File transfer** → *OPDS Browser* — because a deck takes
+the home “library” slot and 1.6.5 has no plugin catalog.
 
 ## Scheduling (device side, counted in deck visits)
 

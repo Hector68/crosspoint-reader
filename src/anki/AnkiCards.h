@@ -103,6 +103,21 @@ class AnkiCardStore {
   // Number of records in a deck (streams the file; nothing is kept in RAM).
   static uint32_t countCards(const std::string& folder);
 
+  // Session counter stored in the deck's progress.bin, **without** bumping it:
+  // how many visits the deck has already had. 0 when the file is missing or was
+  // written by an older layout — the same value the next beginSession() would
+  // start from. The deck list previews a visit with this value + 1, because
+  // beginSession() increments the counter before the first card is shown.
+  static uint32_t storedSession(const std::string& folder);
+
+  // How many of the deck's `cardCount` cards a visit at `session` would really
+  // show: the same rule buildReviewQueue() applies (records that came due, plus
+  // cards that were never answered), so the number on the deck list cannot
+  // drift from what the review screen puts in the queue. Streams progress.bin
+  // once (12 bytes per card) instead of indexing cards.tsv, because the list
+  // screen calls this for every deck on the card.
+  static uint32_t countDueCards(const std::string& folder, uint32_t session, uint32_t cardCount);
+
   // Indexes one deck folder: "/cards/<topic>" or "/plugins/anki/cards/<topic>".
   static void scanRoot(const std::string& rootPath, std::vector<AnkiDeckRef>& out);
 
