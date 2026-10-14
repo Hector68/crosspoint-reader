@@ -44,13 +44,14 @@ class AnkiReviewActivity final : public Activity {
   size_t queuePos_ = 0;
   size_t current_ = SIZE_MAX;  // SIZE_MAX = session finished / nothing to review
   bool flipped_ = false;
-  uint32_t knownCount_ = 0;
   bool missingDeck_ = false;
   // False once the user chose "Review all": the queue then holds every card,
-  // not only the ones whose interval has elapsed.
+  // not only the ones that have come due.
   bool dueOnly_ = true;
   // Distinguishes "Review complete" (a session ran) from "Nothing due"
-  // (every card is still scheduled in the future).
+  // (every card is still scheduled for a later visit).
   bool reviewedAnything_ = false;
-  uint32_t nowEpoch_ = 0;
+  // Number of this deck visit, from AnkiCardStore::beginSession(). A card
+  // answered "I know" is parked until session_ + the Settings minimum.
+  uint32_t session_ = 0;
 };

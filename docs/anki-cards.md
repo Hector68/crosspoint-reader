@@ -12,6 +12,8 @@ working on the Xteink X4 (no PSRAM, ~380 KB RAM).
                               front<TAB>back[<TAB>image]
                               or, with a pronunciation hint:
                               word<TAB>transcription<TAB>translate[<TAB>image]
+                              or the full form, with an example sentence:
+                              word<TAB>transcription<TAB>translate<TAB>context[<TAB>image]
 /cards/<topic>/img_001.bmp    pre-rendered 1bpp images (last field)
 /cards/<topic>/progress.bin   SRS state, written by the device
 ```
@@ -24,11 +26,12 @@ step:
 cp -R sd-plugins/anki fs_/plugins/anki   # simulator SD root; /Volumes/<card> on a real reader
 ```
 
-`sd-plugins/anki/cards` ships two decks (`english-japanese`, three fields with
-one picture, and `english-russian`, four fields with one picture per card), and
-both appear in the deck list after that copy. Decks are **indexed, never
-loaded**: only the byte offset of every line is kept in RAM (4 bytes per card,
-max 1024 cards/deck, 32 decks).
+`sd-plugins/anki/cards` ships three decks: `english-japanese` (three fields,
+one picture), `english-russian` (four fields, one picture per card) and
+`english-context` (the five-field form with an example sentence, plus one card
+that has no picture). All of them appear in the deck list after that copy. Decks
+are **indexed, never loaded**: only the byte offset of every line is kept in RAM
+(4 bytes per card, max 1024 cards/deck, 32 decks).
 
 `cards.tsv` is exactly Anki's own export shape — fields separated by TABs, one
 record per line — with two extra rules the host tool enforces:
@@ -38,14 +41,29 @@ record per line — with two extra rules the host tool enforces:
 * a field must not exceed 480 bytes (truncated at a UTF-8 boundary).
 
 How the fields are read: the **last** field is the picture when it names a
-`.bmp`/`.png`/`.jpg` file. That is what tells the two three-field shapes apart —
-`front<TAB>back<TAB>img.bmp` (Anki's own export, no pronunciation hint) and
-`word<TAB>transcription<TAB>translate` (a deck without pictures). Two fields are
-`word<TAB>translate`; four are the full `word<TAB>transcription<TAB>translate<TAB>image`.
+`.bmp`/`.png`/`.jpg` file. Everything before it is text, and the number of text
+fields picks the layout — two are `word<TAB>translate` (Anki's own Front/Back
+export), three are `word<TAB>transcription<TAB>translate`, and four are
+`word<TAB>transcription<TAB>translate<TAB>context`. The picture is optional and
+always last, so the full five-field form is
+`word<TAB>transcription<TAB>translate<TAB>context<TAB>image`. The extension is
+what tells Anki's own three-field shape (`front<TAB>back<TAB>img.bmp`, no
+pronunciation hint) apart from a three-field record that carries a transcription
+instead.
 
-On the review screen the front shows the word (plus the pronunciation hint when
-there is one) and the picture; the back shows the translation and the picture.
-The title of the front side is never the translation of the card.
+The `context` field is a sentence the word appears in. It is shown on the front
+side only, in italic at the top of the card, separated from the word below by a
+thin inset rule. It is rendered with the same limit as the other text fields, so
+one short sentence (10–15 words) is the right size.
+
+On the review screen the front shows, from the top: the `context` sentence when
+the card has one (italic, above a thin inset rule), then the word (plus the
+pronunciation hint when there is one) and the picture; the back shows the
+translation and the picture. The context is not repeated on the back, and the
+front never shows the translation.
+
+To have a model write a deck from scratch instead of exporting one, use the
+copy-paste prompt in [anki-cards-prompt.md](anki-cards-prompt.md).
 
 ### Why BMP and not PNG
 
@@ -104,32 +122,61 @@ pick a deck → review.
 | Right | “I know” (grades the card *Good*) |
 | Left | “I don't know” (grades the card *Again*) |
 
-The last row of the deck list is **Browse All**, which opens the plugin
-catalog, so OPDS/plugins stay reachable.
+Each row is one deck; its subtitle reads **Cards: N (M)** — `N` is the number of
+records in the deck and `M` how many of them the visit would really show: the
+cards that have come due plus the ones that were never answered, i.e. exactly the
+queue the review screen builds (a card answered “I know” is parked for the
+configured gap and is not counted until it elapses). The preview is read without
+touching the schedule — it counts at the stored visit counter + 1, which is the
+visit `beginSession()` is about to hand out — so opening the list never advances a
+deck. The bracketed number introduces no translatable string of its own.
 
-## Spaced repetition (device side, integer-only)
+The OPDS browser used to be the last row of this list. It now lives in the File
+Transfer menu — Home → **File transfer** → *OPDS Browser* — because a deck takes
+the home “library” slot and 1.6.5 has no plugin catalog.
 
-`progress.bin` holds fixed 12-byte records:
+## Scheduling (device side, counted in deck visits)
+
+`progress.bin` starts with a 12-byte header — `magic u32`, `version u16` (= 2),
+`recordSize u16`, **`sessionCounter u32`** — followed by one fixed 12-byte record
+per card:
 
 | field | type | meaning |
 | --- | --- | --- |
 | `frontHash` | u32 | FNV-1a/32 of the front text |
-| `intervalDays` | u16 | current interval |
-| `repetitions` | u8 | successful repetitions |
-| `againCount` | u8 | times answered “I don't know” |
-| `lastReviewed` | u32 | unix epoch of the last answer |
+| `dueAtSession` | u32 | deck visit this card becomes due again; 0 = never scheduled |
+| `repetitions` | u8 | consecutive “I know” answers |
+| `againCount` | u8 | “I don't know” answers |
+| `reserved` | u16 | padding, keeps the record 12 bytes and 4-byte aligned |
 
-* intervals follow the ladder `{0, 1, 3, 7, 15, 30, 60, 120}` days (SM-2-lite);
-* “I know” moves one step up the ladder, “I don't know” resets it and bumps
-  `againCount`;
-* a card is *due* when `now >= lastReviewed + intervalDays*86400`, and is always
-  due when it was never answered or answered “I don't know”;
-* if the clock was never set (`now < 946684800`, i.e. before 2000-01-01) all
-  intervals are ignored and every card stays reviewable, rather than being
-  locked away behind an interval the device cannot count;
+**Why visits and not days.** The Xteink X4 has no RTC chip, and nothing in the
+firmware seeds the system clock from one (the I2C `Rtc` is a PCF8563 the X4 does
+not populate, and `HalClock::syncFromNTP()` returns early without it, so
+`configTzTime()` never runs). `time()` therefore never reaches a real date, and a
+day-based interval would leave every card permanently due. Counting deck visits
+needs no clock at all and survives reboots and deep sleep, because the counter
+lives on the SD card.
+
+* one **session** = one entry into a deck; the counter is bumped and persisted by
+  `AnkiCardStore::beginSession()` before the first card is shown;
+* “I know” parks the card until `session + N`, where N is the Settings value
+  (Settings → **Reader** → *Anki: pause "I know" cards*, default 4, range 1–30);
+  the gap is **fixed**, not a growing ladder — with visits as the unit a growing
+  one would hide a well-known card for months;
+* “I don't know” sets `dueAtSession = session`, so the card is due immediately
+  and also comes back at the end of the current session;
+* a card is *due* when `dueAtSession == 0` (never answered) or
+  `dueAtSession <= session`;
+* **Review all** (Confirm on the *Review complete* screen) deliberately ignores
+  `dueAtSession` and lists every card, which is how a deck is drilled out of turn;
+* if the counter cannot be written, the screen falls back to showing every card
+  rather than hiding cards behind a schedule the device cannot keep;
 * progress is keyed by `frontHash`, so if the host regenerates a deck with
   different front text the stale record is discarded instead of being applied
-  to a different card.
+  to a different card;
+* a `progress.bin` from the older day-based layout (version 1, 8-byte header) is
+  **replaced** on the next deck entry: the record offsets depend on the header
+  size, so such a file must never be appended to.
 
 ## Firmware changes / how to re-apply after an upstream update
 
@@ -143,11 +190,12 @@ is deliberately additive:
 * touched files: `src/activities/ActivityManager.{h,cpp}` (menu item +
   `goToAnki()`), `src/activities/home/HomeActivity.{h,cpp}` (the library slot),
   `lib/I18n/translations/english.yaml` (new `STR_*` keys);
-* new i18n keys: `STR_ANKI_CARDS`, `STR_NO_CARDS_FOUND`, `STR_BROWSE_ALL`,
-  `STR_N_CARDS`, `STR_FLIP`, `STR_KNOW`, `STR_DONT_KNOW`, `STR_CARD_N_OF_M`,
+* new i18n keys: `STR_ANKI_CARDS`, `STR_NO_CARDS_FOUND`, `STR_N_CARDS`,
+  `STR_FLIP`, `STR_KNOW`, `STR_DONT_KNOW`, `STR_CARD_N_OF_M`,
   `STR_DECK_NOT_FOUND`, `STR_REVIEW_COMPLETE`, `STR_CARD_UNREADABLE`,
-  `STR_IMAGE_TOO_LARGE`, `STR_ANKI_IMPORT_HINT` (English only; other languages
-  fall back to English until the keys are translated).
+  `STR_IMAGE_TOO_LARGE`, `STR_REVIEW_ALL`, `STR_NOTHING_DUE`,
+  `STR_ANKI_MIN_SESSIONS`, `STR_ANKI_MIN_SESSIONS_VALUE_FORMAT` (English only;
+  other languages fall back to English until the keys are translated).
 
 To re-apply on a newer upstream tree: copy the *new files* back as-is, then
 re-make the small edits listed above (the diff is small and localised; the

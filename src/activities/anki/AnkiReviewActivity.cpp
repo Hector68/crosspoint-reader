@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <ctime>
 
+#include "CrossPointSettings.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -23,6 +23,10 @@ constexpr int TEXT_LINE_GAP = 2;
 // Blank space between the card text and the picture. The picture is the last
 // thing in the block, so without it the artwork sits flush against the word.
 constexpr int IMAGE_TOP_GAP = 8;
+// The optional context sentence on the front side sits above the word and is set
+// apart from it by a thin rule, with this much air on either side.
+constexpr int CONTEXT_RULE_GAP = 6;
+constexpr int CONTEXT_RULE_THICKNESS = 1;
 }  // namespace
 
 AnkiReviewActivity::AnkiReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, AnkiDeckRef deck)
@@ -31,20 +35,26 @@ AnkiReviewActivity::AnkiReviewActivity(GfxRenderer& renderer, MappedInputManager
 void AnkiReviewActivity::onEnter() {
   Activity::onEnter();
 
-  nowEpoch_ = static_cast<uint32_t>(time(nullptr));
-
   if (!store_.open(deck_.folder)) {
     missingDeck_ = true;
     draw();
     return;
   }
 
-  buildQueue(true);
+  // One deck entry is one session. The counter is persisted, so a "I know"
+  // postponement survives reboots and deep sleep (the X4 has no clock, see
+  // docs/anki-cards.md). When the counter cannot be written, review everything
+  // instead of hiding cards behind a schedule the device cannot keep.
+  const bool haveSession = store_.beginSession(session_);
+  if (!haveSession) {
+    LOG_ERR("ANKI", "No session counter for %s; showing every card", deck_.folder.c_str());
+  }
+  buildQueue(haveSession);
   if (!queue_.empty()) showCard(queue_[0]);
   // Heap ledger for field reports: this is the peak for the screen, with the
   // deck's line offsets (4 bytes per card) and the due queue both resident.
-  LOG_INF("MEM", "anki review enter: free=%u max_block=%u", static_cast<unsigned>(ESP.getFreeHeap()),
-          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  LOG_INF("MEM", "anki review enter: free=%u max_block=%u session=%u", static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()), static_cast<unsigned>(session_));
   draw();
 }
 
@@ -61,10 +71,9 @@ void AnkiReviewActivity::buildQueue(const bool dueOnly) {
   queue_.clear();
   queuePos_ = 0;
   current_ = SIZE_MAX;
-  knownCount_ = 0;
   flipped_ = false;
 
-  buildReviewQueue(store_, nowEpoch_, dueOnly, queue_);
+  buildReviewQueue(store_, session_, dueOnly, queue_);
   if (!queue_.empty()) showCard(queue_[0]);
 }
 
@@ -82,13 +91,11 @@ void AnkiReviewActivity::showCard(const size_t index) {
 void AnkiReviewActivity::answer(const AnkiGrade grade) {
   if (current_ == SIZE_MAX) return;
 
-  if (!store_.recordGrade(current_, grade, nowEpoch_)) {
+  if (!store_.recordGrade(current_, grade, session_, SETTINGS.ankiMinSessions)) {
     LOG_ERR("ANKI", "Could not persist progress for card %zu of %s", current_, deck_.folder.c_str());
   }
 
-  if (grade == AnkiGrade::Good) {
-    ++knownCount_;
-  } else if (queue_.size() < AnkiCardStore::MAX_CARDS_PER_DECK) {
+  if (grade == AnkiGrade::Again && queue_.size() < AnkiCardStore::MAX_CARDS_PER_DECK) {
     // Not known yet: show it again at the end of this session.
     queue_.push_back(current_);
   }
@@ -103,7 +110,13 @@ void AnkiReviewActivity::answer(const AnkiGrade grade) {
 }
 
 void AnkiReviewActivity::loop() {
-  mappedInput.update();
+  // No mappedInput.update() here on purpose: the main loop already calls it once
+  // per iteration before dispatching (main.cpp), and InputManager computes its
+  // press/release edges against the previous state and then commits it
+  // (applyStateChange ends with `currentState = state`). A second update in the
+  // same iteration therefore recomputes `state & ~state` = 0 and wipes the
+  // edges, so every wasReleased() below would report nothing and no button
+  // would respond.
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
@@ -161,11 +174,12 @@ void AnkiReviewActivity::draw() {
     renderer.drawCenteredText(UI_10_FONT_ID, (y + bottom) / 2,
                               I18N.get(reviewedAnything_ ? StrId::STR_REVIEW_COMPLETE : StrId::STR_NOTHING_DUE));
   } else {
-    // Side A (before the flip): Word (large) + Transcription (smaller) + Image.
-    // Side B (after the flip): Translate + Image. The main line is pinned to
-    // the top of the content area, so the word — and, after the flip, the
-    // translation — always starts in the same place; the pronunciation hint
-    // and the picture follow underneath. Text is centred horizontally only.
+    // Side A (before the flip): Context (optional) + Word (large) + Transcription
+    // (smaller) + Image. Side B (after the flip): Translate + Image. The block is
+    // pinned to the top of the content area rather than centred, so the word —
+    // and, after the flip, the translation — always starts in the same place; the
+    // context, the hint and the picture follow in order. Text is centred
+    // horizontally only.
     const bool wordSide = !flipped_;
     const int mainFont = wordSide ? NOTOSERIF_18_FONT_ID : NOTOSERIF_14_FONT_ID;
     const std::string mainText = wordSide ? card_.word : card_.translate;
@@ -199,10 +213,21 @@ void AnkiReviewActivity::draw() {
     if (!subText.empty()) {
       subLines = renderer.wrappedText(NOTOSERIF_14_FONT_ID, subText.c_str(), textWidth, CARD_TEXT_LINES);
     }
+    // Front side only: the sentence the word appears in, drawn above the word
+    // and separated from it by a thin rule (see docs/anki-cards.md).
+    std::vector<std::string> contextLines;
+    if (wordSide && !card_.context.empty()) {
+      contextLines = renderer.wrappedText(NOTOSERIF_14_FONT_ID, card_.context.c_str(), textWidth, CARD_TEXT_LINES);
+    }
     const int mainStep = renderer.getTextHeight(mainFont) + TEXT_LINE_GAP;
     const int subStep = renderer.getTextHeight(NOTOSERIF_14_FONT_ID) + TEXT_LINE_GAP;
+    const int contextStep = subStep;
+    const int contextBlock = contextLines.empty()
+                                 ? 0
+                                 : static_cast<int>(contextLines.size()) * contextStep + 2 * CONTEXT_RULE_GAP +
+                                       CONTEXT_RULE_THICKNESS;
     const int textHeight =
-        static_cast<int>(mainLines.size()) * mainStep + static_cast<int>(subLines.size()) * subStep;
+        contextBlock + static_cast<int>(mainLines.size()) * mainStep + static_cast<int>(subLines.size()) * subStep;
 
     // Fit the picture into the space the text leaves over. A deck may ship
     // artwork larger than that space, and drawBitmap scales a bitmap down to
@@ -220,9 +245,22 @@ void AnkiReviewActivity::draw() {
       }
     }
 
-    // The main line (word, or the translation after the flip) is pinned to the
-    // top of the content area; the hint and the picture follow it down.
+    // The block is pinned to the top of the content area: context first (front
+    // side only), then the word or the translation, the hint and the picture.
     int lineY = y;
+
+    for (const auto& line : contextLines) {
+      // Italic marks the sentence as an example rather than a field of the card.
+      renderer.drawCenteredText(NOTOSERIF_14_FONT_ID, lineY, line.c_str(), true, EpdFontFamily::ITALIC);
+      lineY += contextStep;
+    }
+    if (!contextLines.empty()) {
+      lineY += CONTEXT_RULE_GAP;
+      // Inset so the rule reads as a separator rather than a full-width frame.
+      const int ruleInset = textWidth / 8;
+      renderer.drawLine(safe.x + ruleInset, lineY, safe.x + textWidth - ruleInset, lineY, true);
+      lineY += CONTEXT_RULE_THICKNESS + CONTEXT_RULE_GAP;
+    }
 
     for (const auto& line : mainLines) {
       renderer.drawCenteredText(mainFont, lineY, line.c_str());

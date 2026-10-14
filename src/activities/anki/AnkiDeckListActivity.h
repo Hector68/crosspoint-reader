@@ -7,8 +7,9 @@
 
 /**
  * Lists the Anki decks found on the SD card (/cards/<topic>/cards.tsv).
- * Selecting a deck starts a review session; the last row opens the SD plugin
- * catalog, which is how decks get installed. See docs/anki-cards.md.
+ * Selecting a deck starts a review session. Each row shows "Cards: N (M)" — the
+ * deck size and how many of those cards the coming visit will actually show.
+ * See docs/anki-cards.md.
  *
  * Row structure (labels/subtitles + the owned strings they point into) is built
  * once in onEnter() — reading card counts touches the SD, so it must not happen
@@ -21,6 +22,13 @@ class AnkiDeckListActivity final : public UiListActivity {
   void onEnter() override;
 
  private:
+  // Leaving goes home *through the manager* instead of finish(): this screen
+  // replaces Home (see ActivityManager::goToAnki), so a plain pop would leave an
+  // empty stack and rebuild Home with no menu item selected, parking the cursor
+  // on the first row instead of on "Anki cards". goHome() maps the "AnkiDecks"
+  // name back to HomeMenuItem::ANKI_CARDS.
+  void onBackButton() override { onGoHome(); }
+
   int listCount() const override { return static_cast<int>(rowItems_.size()); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;

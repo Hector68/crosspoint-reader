@@ -1,5 +1,28 @@
 # CrossPoint Reader
 
+> ## 🍴 This is a personal fork: "1.6.5 Hector Edition"
+>
+> This repository is a **fork** of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader),
+> maintained by [@Hector68](https://github.com/Hector68) and branched from the official **1.6.5** tag.
+> Everything below is upstream's work and documentation; the additions are listed here and marked in the
+> changed files.
+>
+> **Added on top of 1.6.5**
+>
+> - **Anki flashcards** — review vocabulary decks on the device (Xteink X3/X4). Decks are plain files on
+>   the SD card, so adding one needs no firmware rebuild. Full format, install steps and limits:
+>   **[docs/anki-cards.md](docs/anki-cards.md)**.
+> - The schedule is counted in **deck visits**, not days: the X4 has no RTC and nothing seeds the system
+>   clock, so a day-based interval would leave every card permanently due. A card answered "I know" is
+>   parked for N visits (default 4, configurable in Settings → Reader → *Anki: pause "I know" cards*).
+> - An optional **context** field: a sentence the word appears in, shown on the front of the card above
+>   the word and separated from it by a thin rule.
+> - The boot splash names the build **1.6.5 Hector Edition**.
+>
+> **Generating decks with an LLM:** [docs/anki-cards-prompt.md](docs/anki-cards-prompt.md) is a
+> copy-paste prompt that makes a model emit a valid `cards.tsv` plus correctly formatted 1-bit BMP
+> artwork. Two ready-made decks ship in [`sd-plugins/anki/cards/`](sd-plugins/anki/cards/).
+
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 
 CrossPoint is open-source e-reader firmware - community-built, fully hackable, free forever. It's maintained by a growing community of developers and readers who believe your device should do what you want - not what a manufacturer decided for you.
@@ -152,6 +175,8 @@ Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` 
 ## Documentation
 
 - [User Guide](./USER_GUIDE.md)
+- [Anki flashcards (fork): format, install, `context` field](./docs/anki-cards.md)
+- [Anki deck prompt for LLMs (fork)](./docs/anki-cards-prompt.md)
 - [Web server usage](./docs/webserver.md)
 - [Web server endpoints](./docs/webserver-endpoints.md)
 - [Project scope](./SCOPE.md)

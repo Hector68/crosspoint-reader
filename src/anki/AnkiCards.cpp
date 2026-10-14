@@ -8,8 +8,9 @@
 
 namespace {
 constexpr uint32_t PROGRESS_MAGIC = 0x4b415043;  // 'CPAK'
-constexpr uint16_t PROGRESS_VERSION = 1;
-constexpr uint16_t INVALID_INTERVAL = 0xffffu;
+// v2 replaced the day-based schedule with the deck-visit counter, so a v1 file
+// is not readable and gets rewritten (see beginSession/recordGrade).
+constexpr uint16_t PROGRESS_VERSION = 2;
 
 // Checked POD transfer. The develop branch carries serialization::tryReadPod /
 // tryWritePod, but this fork is based on the 1.6.5 tag, where
@@ -24,6 +25,41 @@ bool tryReadPod(HalFile& file, T& value) {
 template <typename T>
 bool tryWritePod(HalFile& file, const T& value) {
   return file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T)) == sizeof(T);
+}
+
+// Writes a fresh progress file: header (carrying the session counter) plus one
+// empty slot per card. Slots are reserved up front because a file cannot be
+// seeked past its end, and a record is later written at a fixed offset.
+bool writeProgressFile(const std::string& path, const uint32_t session, const size_t cardCount) {
+  Storage.remove(path.c_str());  // a stale layout must not leave a tail behind
+  HalFile created;
+  if (!Storage.openFileForWrite("ANKI", path, created)) {
+    LOG_ERR("ANKI", "Cannot create progress file: %s", path.c_str());
+    return false;
+  }
+  const uint16_t recordSize = static_cast<uint16_t>(sizeof(AnkiProgressRecord));
+  bool ok = tryWritePod(created, PROGRESS_MAGIC) && tryWritePod(created, PROGRESS_VERSION) &&
+            tryWritePod(created, recordSize) && tryWritePod(created, session);
+  const AnkiProgressRecord empty{};
+  for (size_t i = 0; ok && i < cardCount; ++i) {
+    ok = tryWritePod(created, empty);
+  }
+  created.close();
+  if (!ok) LOG_ERR("ANKI", "Cannot write progress header: %s", path.c_str());
+  return ok;
+}
+
+// Reads the header and reports whether it matches this build's layout. A file
+// from an older version (or a truncated one) must be replaced, not appended to:
+// the record offsets depend on the header size.
+bool readProgressHeader(HalFile& file, uint32_t& session) {
+  uint32_t magic = 0;
+  uint16_t version = 0;
+  uint16_t recordSize = 0;
+  session = 0;
+  return tryReadPod(file, magic) && magic == PROGRESS_MAGIC && tryReadPod(file, version) &&
+         version == PROGRESS_VERSION && tryReadPod(file, recordSize) &&
+         recordSize == sizeof(AnkiProgressRecord) && tryReadPod(file, session);
 }
 
 // True when a field names a picture file, e.g. "img_001.bmp" (what the host
@@ -52,36 +88,29 @@ uint32_t AnkiCardStore::hashFront(const std::string& front) {
   return h;
 }
 
-uint16_t AnkiSrs::intervalForRepetitions(const uint8_t repetitions) {
-  return repetitions < INTERVAL_COUNT ? INTERVAL_DAYS[repetitions] : INTERVAL_DAYS[INTERVAL_COUNT - 1];
-}
-
 AnkiProgressRecord AnkiSrs::applyGrade(const AnkiProgressRecord& current, const AnkiGrade grade,
-                                       const uint32_t nowEpoch) {
+                                       const uint32_t session, const uint8_t minSessions) {
   AnkiProgressRecord next = current;
-  next.lastReviewed = nowEpoch;
+  // A zero gap would make the card due again immediately, defeating the point of
+  // answering "I know"; the setting's own range is the source of truth.
+  const uint8_t gap = std::max<uint8_t>(1u, minSessions);
   if (grade == AnkiGrade::Good) {
-    // One step up the ladder per correct answer; the last interval repeats.
-    next.repetitions = static_cast<uint8_t>(std::min<unsigned>(current.repetitions + 1u, INTERVAL_COUNT));
-    next.intervalDays = intervalForRepetitions(next.repetitions);
+    // A fixed gap rather than a growing ladder: the unit is a deck visit, so a
+    // growing one would hide a well-known card for months.
+    next.repetitions = static_cast<uint8_t>(std::min<unsigned>(current.repetitions + 1u, 255u));
+    next.dueAtSession = session + gap;
   } else if (grade == AnkiGrade::Again) {
     next.repetitions = 0;
-    next.intervalDays = 0;  // due again immediately
+    next.dueAtSession = session;  // due again immediately
     next.againCount = static_cast<uint8_t>(std::min<unsigned>(current.againCount + 1u, 255u));
   }
   return next;
 }
 
-bool AnkiSrs::isDue(const AnkiProgressRecord& record, const uint32_t nowEpoch) {
-  // A card that was never answered, or answered "don't know", is always due.
-  if (record.intervalDays == 0 || record.lastReviewed == 0) return true;
-  // A clock the host never set (no NTP before the first review) makes intervals
-  // meaningless; keeping every card due is safer than locking the deck away
-  // behind an interval the device cannot count.
-  if (nowEpoch < AnkiCardStore::MIN_VALID_EPOCH) return true;
-  const uint64_t dueAt =
-      static_cast<uint64_t>(record.lastReviewed) + static_cast<uint64_t>(record.intervalDays) * 86400ull;
-  return static_cast<uint64_t>(nowEpoch) >= dueAt;
+bool AnkiSrs::isDue(const AnkiProgressRecord& record, const uint32_t session) {
+  // dueAtSession == 0 means the card was never answered (or its record was
+  // dropped because the deck text changed): always due.
+  return record.dueAtSession == 0 || record.dueAtSession <= session;
 }
 
 uint32_t AnkiCardStore::countCards(const std::string& folder) {
@@ -107,6 +136,45 @@ uint32_t AnkiCardStore::countCards(const std::string& folder) {
   if (inLine) ++count;  // final record without a trailing newline
   file.close();
   return count;
+}
+
+uint32_t AnkiCardStore::storedSession(const std::string& folder) {
+  HalFile file;
+  if (!Storage.openFileForRead("ANKI", folder + "/progress.bin", file)) return 0;  // never reviewed
+  uint32_t session = 0;
+  const bool usable = readProgressHeader(file, session);
+  file.close();
+  // An unusable header means beginSession() will rewrite the file and start at
+  // zero, so reporting 0 here keeps the preview in step with that visit.
+  return usable ? session : 0;
+}
+
+uint32_t AnkiCardStore::countDueCards(const std::string& folder, const uint32_t session, const uint32_t cardCount) {
+  if (cardCount == 0) return 0;
+
+  HalFile file;
+  if (!Storage.openFileForRead("ANKI", folder + "/progress.bin", file)) {
+    return cardCount;  // no schedule on the card: every card is new
+  }
+  uint32_t stored = 0;
+  if (!readProgressHeader(file, stored)) {
+    file.close();
+    return cardCount;  // older/truncated layout: beginSession() starts it over empty
+  }
+
+  // Records are fixed-size slots in deck order, so one sequential pass answers
+  // the question — a seek per card would put a stall on the list screen.
+  uint32_t due = 0;
+  uint32_t read = 0;
+  AnkiProgressRecord record{};
+  while (read < cardCount && tryReadPod(file, record)) {
+    if (AnkiSrs::isDue(record, session)) ++due;
+    ++read;
+  }
+  file.close();
+  // Slots past the end of a truncated file carry no record, so those cards are
+  // as new as an unwritten slot — the review queue treats them the same way.
+  return due + (cardCount - read);
 }
 
 bool AnkiCardStore::scanDecks(std::vector<AnkiDeckRef>& out) {
@@ -167,7 +235,7 @@ bool AnkiCardStore::hasAnyDeck() {
 
 // A session is bounded by the number of cards, not by how many are due:
 // 1024 * sizeof(size_t) is the worst case and is allocated once on entry.
-void buildReviewQueue(const AnkiCardStore& store, const uint32_t nowEpoch, const bool dueOnly,
+void buildReviewQueue(const AnkiCardStore& store, const uint32_t session, const bool dueOnly,
                       std::vector<size_t>& out) {
   out.clear();
   const size_t count = store.cardCount();
@@ -176,7 +244,7 @@ void buildReviewQueue(const AnkiCardStore& store, const uint32_t nowEpoch, const
   for (size_t i = 0; i < count; ++i) {
     AnkiProgressRecord progress{};
     store.loadProgress(i, progress);  // absent/stale record => treat as a new card
-    if (!dueOnly || AnkiSrs::isDue(progress, nowEpoch)) out.push_back(i);
+    if (!dueOnly || AnkiSrs::isDue(progress, session)) out.push_back(i);
   }
 }
 
@@ -246,7 +314,9 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
     return false;
   }
   // Read the whole maximum-size record in one call: one SD read per card shown.
-  char line[MAX_FIELD_BYTES * 2 + MAX_IMAGE_NAME_BYTES + 10];
+  // Sized for four text fields plus an image name, the longest record the format
+  // allows (2 KB on the stack, the same order as the rest of the firmware).
+  char line[MAX_FIELD_BYTES * 4 + MAX_IMAGE_NAME_BYTES + 10];
   const int n = file.read(line, sizeof(line) - 1);
   file.close();
   if (n <= 0) return false;
@@ -261,12 +331,12 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) line[--length] = '\0';
 
   // Fields are plain text; the host tool guarantees no tabs/newlines inside
-  // them. At most four are split, which is the longest supported record.
-  const char* fields[4] = {nullptr, nullptr, nullptr, nullptr};
+  // them. At most five are split, which is the longest supported record.
+  const char* fields[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   size_t fieldCount = 0;
   char* p = line;
   size_t remaining = length;
-  while (fieldCount < 4) {
+  while (fieldCount < 5) {
     fields[fieldCount++] = p;
     char* tab = remaining > 0 ? static_cast<char*>(memchr(p, '\t', remaining)) : nullptr;
     if (!tab) break;
@@ -276,21 +346,26 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   }
   if (fieldCount < 2) return false;  // a record without a tab is not a card
 
-  // Four fields are the canonical layout (word, transcription, translate,
-  // image). Three fields are ambiguous, so the last one decides: an image file
-  // name means the record is in Anki's own export shape (front, back, image —
-  // what scripts/anki_import.py writes), anything else means it is
-  // word/transcription/translate (a deck without a picture).
+  // An optional picture always comes last, and the number of remaining text
+  // fields picks the meaning:
+  //   2 = word, translate              (Anki's own Front/Back export)
+  //   3 = word, transcription, translate
+  //   4 = word, transcription, translate, context
+  // The picture is recognised by its file extension. That is what keeps Anki's
+  // own three-field shape (front, back, image) apart from a three-field record
+  // that carries a transcription instead.
   size_t textFields = fieldCount;
-  if (fieldCount == 4) {
-    out.image = fields[3];  // a missing picture is written as an empty field
-    textFields = 3;
-  } else if (fieldCount == 3 && looksLikeImageName(fields[2])) {
-    out.image = fields[2];
-    textFields = 2;
+  if (looksLikeImageName(fields[fieldCount - 1])) {
+    out.image = fields[fieldCount - 1];
+    textFields = fieldCount - 1;
   }
 
-  if (textFields >= 3) {
+  if (textFields >= 4) {
+    out.word = fields[0];
+    out.transcription = fields[1];
+    out.translate = fields[2];
+    out.context = fields[3];
+  } else if (textFields == 3) {
     out.word = fields[0];
     out.transcription = fields[1];
     out.translate = fields[2];
@@ -304,7 +379,7 @@ bool AnkiCardStore::readCard(const size_t index, AnkiCard& out) const {
   if (out.word.empty()) return false;
 
   if (out.word.size() > MAX_FIELD_BYTES || out.transcription.size() > MAX_FIELD_BYTES ||
-      out.translate.size() > MAX_FIELD_BYTES) {
+      out.translate.size() > MAX_FIELD_BYTES || out.context.size() > MAX_FIELD_BYTES) {
     LOG_ERR("ANKI", "Card %u in %s exceeds the %u-byte field limit", static_cast<unsigned>(index), title_.c_str(),
             static_cast<unsigned>(MAX_FIELD_BYTES));
   }
@@ -317,12 +392,8 @@ bool AnkiCardStore::loadProgress(const size_t index, AnkiProgressRecord& out) co
 
   HalFile file;
   if (!Storage.openFileForRead("ANKI", progressPath(), file)) return false;  // never reviewed here
-  uint32_t magic = 0;
-  uint16_t version = 0;
-  uint16_t recordSize = 0;
-  bool ok = tryReadPod(file, magic) && magic == PROGRESS_MAGIC;
-  ok = ok && tryReadPod(file, version) && version == PROGRESS_VERSION;
-  ok = ok && tryReadPod(file, recordSize) && recordSize == sizeof(AnkiProgressRecord);
+  uint32_t session = 0;
+  bool ok = readProgressHeader(file, session);
   if (ok) {
     // Fixed-size records, one per card in deck order: seek straight to the slot.
     ok = file.seek(PROGRESS_HEADER_BYTES + index * sizeof(AnkiProgressRecord)) && tryReadPod(file, out);
@@ -335,7 +406,44 @@ bool AnkiCardStore::loadProgress(const size_t index, AnkiProgressRecord& out) co
   return ok;
 }
 
-bool AnkiCardStore::recordGrade(const size_t index, const AnkiGrade grade, const uint32_t nowEpoch) {
+bool AnkiCardStore::beginSession(uint32_t& outSession) {
+  outSession = 0;
+  if (offsets_.empty()) return false;
+
+  // Read the counter this deck has reached. A missing file, or one written by
+  // an older layout, starts the deck over at zero.
+  uint32_t session = 0;
+  bool usable = false;
+  HalFile file;
+  if (Storage.openFileForRead("ANKI", progressPath(), file)) {
+    usable = readProgressHeader(file, session);
+    file.close();
+  }
+  if (!usable) {
+    session = 0;
+    if (!writeProgressFile(progressPath(), session, offsets_.size())) return false;
+  }
+
+  // Persist the counter for this visit before any card is shown: the whole
+  // schedule hangs off it, and a reboot mid-session must not rewind it.
+  session += 1;
+  HalFile counter = Storage.open(progressPath().c_str(), O_RDWR);
+  if (!counter) {
+    LOG_ERR("ANKI", "Cannot open progress file for the session counter: %s", progressPath().c_str());
+    return false;
+  }
+  const bool ok = counter.seek(PROGRESS_HEADER_BYTES - sizeof(uint32_t)) && tryWritePod(counter, session);
+  counter.close();
+  if (!ok) {
+    LOG_ERR("ANKI", "Cannot persist the session counter: %s", progressPath().c_str());
+    return false;
+  }
+  outSession = session;
+  return true;
+}
+
+bool AnkiCardStore::recordGrade(const size_t index, const AnkiGrade grade, const uint32_t session,
+                                const uint8_t minSessions) {
   if (index >= offsets_.size()) return false;
 
   AnkiCard card;
@@ -346,30 +454,13 @@ bool AnkiCardStore::recordGrade(const size_t index, const AnkiGrade grade, const
   // A record belonging to different front text (the host regenerated the deck)
   // is dropped rather than applied to the new card.
   if (record.frontHash != hashFront(card.word)) record = AnkiProgressRecord{};
-  record = AnkiSrs::applyGrade(record, grade, nowEpoch);
+  record = AnkiSrs::applyGrade(record, grade, session, minSessions);
   record.frontHash = hashFront(card.word);
 
-  // Create the file (header + one empty slot per card) before writing a record
-  // at an offset: a file cannot be seeked past its end, so a deck whose cards
-  // have never been answered must have every slot reserved up front.
+  // beginSession() normally created the file already; this keeps recordGrade
+  // usable on its own (the host tests call it directly).
   if (!Storage.exists(progressPath().c_str())) {
-    HalFile created;
-    if (!Storage.openFileForWrite("ANKI", progressPath(), created)) {
-      LOG_ERR("ANKI", "Cannot create progress file: %s", progressPath().c_str());
-      return false;
-    }
-    const uint16_t recordSize = static_cast<uint16_t>(sizeof(AnkiProgressRecord));
-    bool ok = tryWritePod(created, PROGRESS_MAGIC) && tryWritePod(created, PROGRESS_VERSION) &&
-              tryWritePod(created, recordSize);
-    const AnkiProgressRecord empty{};
-    for (size_t i = 0; ok && i < offsets_.size(); ++i) {
-      ok = tryWritePod(created, empty);
-    }
-    created.close();
-    if (!ok) {
-      LOG_ERR("ANKI", "Cannot write progress header: %s", progressPath().c_str());
-      return false;
-    }
+    if (!writeProgressFile(progressPath(), session, offsets_.size())) return false;
   }
 
   HalFile file = Storage.open(progressPath().c_str(), O_RDWR);

@@ -31,9 +31,9 @@ void AnkiDeckListActivity::onEnter() {
 
 const char* AnkiDeckListActivity::headerTitle() const { return tr(STR_ANKI_CARDS); }
 
-// Rows: [deck 0..n-1], [OPDS browser]. 1.6.5 has no plugin catalog, and a deck
-// takes the home "library" slot, so the last row is what keeps the OPDS browser
-// reachable while decks are installed.
+// Rows: the decks, and nothing else. The OPDS browser used to be the last row
+// here, because a deck takes the home "library" slot and 1.6.5 has no plugin
+// catalog; it now lives in the File Transfer menu instead.
 void AnkiDeckListActivity::rebuildRowItems() {
   rowItems_.clear();
   subtitles_.clear();
@@ -45,13 +45,24 @@ void AnkiDeckListActivity::rebuildRowItems() {
   }
 
   const size_t deckCount = decks_.size();
-  rowItems_.reserve(deckCount + 1);
+  rowItems_.reserve(deckCount);
   subtitles_.reserve(deckCount);
 
   for (size_t i = 0; i < deckCount; ++i) {
     const uint32_t cards = AnkiCardStore::countCards(decks_[i].folder);
+    // The bracketed number is how many of those cards this visit will really
+    // show: the due ones plus the ones never answered — exactly the queue the
+    // review screen builds. beginSession() bumps the stored visit counter before
+    // the first card, so the preview has to count at +1: a card parked until the
+    // next visit is due then, not now. No new translatable string is introduced
+    // for it — a number in brackets needs no translating, and the line stays
+    // readable in every language.
+    const uint32_t active = AnkiCardStore::countDueCards(decks_[i].folder,
+                                                         AnkiCardStore::storedSession(decks_[i].folder) + 1, cards);
+    char cardsText[32];
+    snprintf(cardsText, sizeof(cardsText), tr(STR_N_CARDS), static_cast<unsigned>(cards));
     char count[48];
-    snprintf(count, sizeof(count), tr(STR_N_CARDS), static_cast<unsigned>(cards));
+    snprintf(count, sizeof(count), "%s (%u)", cardsText, static_cast<unsigned>(active));
     subtitles_.push_back(count);
 
     fui::ListItem item;
@@ -60,11 +71,6 @@ void AnkiDeckListActivity::rebuildRowItems() {
     item.actionValue = static_cast<int16_t>(i);
     rowItems_.push_back(item);
   }
-
-  fui::ListItem opdsRow;
-  opdsRow.label = tr(STR_OPDS_BROWSER);
-  opdsRow.actionValue = static_cast<int16_t>(deckCount);
-  rowItems_.push_back(opdsRow);
 }
 
 void AnkiDeckListActivity::buildScreen(UiScreen& screen) {
@@ -100,9 +106,7 @@ void AnkiDeckListActivity::activateIndex(const int index) {
   app.clearTapFlash();
 
   if (index < 0 || index >= static_cast<int>(decks_.size())) {
-    // Last row: the OPDS browser (1.6.5 has no plugin catalog).
-    activityManager.goToBrowser();
-    return;
+    return;  // the list only holds decks; a stale index must not open anything
   }
 
   auto activity = makeUniqueNoThrow<AnkiReviewActivity>(renderer, mappedInput, decks_[index]);

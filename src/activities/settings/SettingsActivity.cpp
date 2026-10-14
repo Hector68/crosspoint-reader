@@ -521,6 +521,13 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
     return "";
   }
   if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
+    if (setting.nameId == StrId::STR_ANKI_MIN_SESSIONS) {
+      // The unit is a deck visit, not a day: the row must not read like a clock.
+      char valueBuffer[32];
+      snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_ANKI_MIN_SESSIONS_VALUE_FORMAT),
+               static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
+      return valueBuffer;
+    }
     if (setting.nameId == StrId::STR_TIME_TO_SLEEP) {
       if (SETTINGS.sleepTimeoutMinutes >= CrossPointSettings::SLEEP_TIMEOUT_NEVER_MINUTES) {
         return tr(STR_SLEEP_NEVER);

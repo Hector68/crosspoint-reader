@@ -10,6 +10,18 @@
 namespace fui = freeink::ui;
 
 namespace {
+// Row order. The mapping is explicit rather than a cast from the row index
+// because the USB row only exists in builds with USB MSC support, and the OPDS
+// row is not a network mode at all.
+constexpr NetworkMode menuModes[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+    NetworkMode::JOIN_NETWORK,
+    NetworkMode::CONNECT_CALIBRE,
+    NetworkMode::CREATE_HOTSPOT,
+#if FREEINK_CAP_USB_MSC
+    NetworkMode::USB_DRIVE,
+#endif
+    NetworkMode::OPDS_BROWSER,
+};
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
     StrId::STR_JOIN_NETWORK,
     StrId::STR_CALIBRE_WIRELESS,
@@ -17,8 +29,12 @@ constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE,
 #endif
+    StrId::STR_OPDS_BROWSER,
 };
-constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+// One entry per row except the last one: the OPDS browser row carries no
+// description of its own (the list gives every row the same two-line height, so
+// it just stays blank under the label rather than needing a translated string).
+constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT - 1] = {
     StrId::STR_JOIN_DESC,
     StrId::STR_CALIBRE_DESC,
     StrId::STR_HOTSPOT_DESC,
@@ -33,6 +49,7 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #if FREEINK_CAP_USB_MSC
     UIIcon::Usb,
 #endif
+    UIIcon::Book,
 };
 }  // namespace
 
@@ -42,7 +59,7 @@ NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer
   for (int i = 0; i < MENU_ITEM_COUNT; i++) {
     fui::ListItem item;
     item.label = I18N.get(menuItems[i]);
-    item.subtitle = I18N.get(menuDescs[i]);
+    if (i < MENU_ITEM_COUNT - 1) item.subtitle = I18N.get(menuDescs[i]);
     item.icon = listIconFor(menuIcons[i], 32);  // subtitle rows carry the larger icon
     item.actionValue = static_cast<int16_t>(i);
     rowItems_[i] = item;
@@ -59,7 +76,8 @@ void NetworkModeSelectionActivity::activateIndex(const int index) {
   app.clearTapFlash();
   nav.selected = index;
 
-  onModeSelected(static_cast<NetworkMode>(index));
+  if (index < 0 || index >= MENU_ITEM_COUNT) return;  // a stale row must not fire a mode
+  onModeSelected(menuModes[index]);
 }
 
 void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
